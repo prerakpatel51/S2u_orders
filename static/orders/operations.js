@@ -2,22 +2,30 @@ const serviceList = document.getElementById('service-list');
 const runList = document.getElementById('run-list');
 const latencyList = document.getElementById('latency-list');
 const logList = document.getElementById('log-list');
+const stockStoreList = document.getElementById('stock-store-list');
 const fullSyncDialog = document.getElementById('full-sync-dialog');
 let operationsTimer;
 let operationsData;
 
 const serviceLabels = {stores: 'Stores', products: 'Products & barcodes', stocks: 'Stock changes', stock_reconciliation: 'Nightly stock reconciliation', receipts: 'Receipts & 30-day totals'};
-const stageLabels = {stores: 'Stores', products: 'Products', stocks: 'Stocks', receipts: 'Receipts', totals: '30-day totals'};
+const stageLabels = {stores: 'Stores', products: 'Products', stocks: 'Store stocks', receipts: 'Receipts', totals: '30-day totals'};
+const countLabels = {active_stores: 'Active stock stores', products: 'Products', stock_records: 'Stock records', thirty_day_totals: '30-day totals'};
 const escapeOps = value => { const element = document.createElement('div'); element.textContent = value ?? ''; return element.innerHTML; };
 const dateTime = value => value ? new Date(value).toLocaleString() : 'Not run';
 const duration = milliseconds => milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(1)} s` : `${milliseconds} ms`;
 const intervalLabel = seconds => seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} sec`;
-const elapsedTime = value => {
+const elapsedTime = (value, finishedAt = null) => {
   if (!value) return '-';
-  const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  const seconds = Math.max(0, Math.floor(((finishedAt ? new Date(finishedAt).getTime() : Date.now()) - new Date(value).getTime()) / 1000));
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   return hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds % 60}s`;
+};
+const ageLabel = seconds => {
+  if (seconds === null || seconds === undefined) return 'Never';
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 };
 
 function progressRow(name, value = {}) {
@@ -47,11 +55,39 @@ function renderFullSync(data) {
   if (['stores', 'products', 'stocks', 'receipts', 'totals'].includes(job.stage)) {
     stageProgress[job.stage] = {processed: job.processed, total: job.total, current_batch: job.current_batch, total_batches: job.total_batches, status: job.status === 'success' ? 'complete' : 'running'};
   }
-  status.innerHTML = `<div class="full-sync-summary"><div><span class="status ${job.status}">${escapeOps(job.status)}</span><strong>${escapeOps(stageLabels[job.stage] || job.stage)}</strong></div><div><small>Started</small><span>${dateTime(job.started_at)}</span></div><div><small>Elapsed</small><span>${elapsedTime(job.started_at)}</span></div><div><small>Initiated by</small><span>${escapeOps(job.initiated_by)}</span></div></div><div class="stage-list">${['stores', 'products', 'stocks', 'receipts', 'totals'].map(name => progressRow(name, stageProgress[name])).join('')}</div>${job.error ? `<div class="operation-error">${escapeOps(job.error)}</div>` : ''}`;
+  status.innerHTML = `<div class="full-sync-summary"><div><span class="status ${job.status}">${escapeOps(job.status)}</span><strong>${escapeOps(stageLabels[job.stage] || job.stage)}</strong></div><div><small>Started</small><span>${dateTime(job.started_at)}</span></div><div><small>Duration</small><span>${elapsedTime(job.started_at, job.finished_at)}</span></div><div><small>Initiated by</small><span>${escapeOps(job.initiated_by)}</span></div></div><div class="stage-list">${['stores', 'products', 'stocks', 'receipts', 'totals'].map(name => progressRow(name, stageProgress[name])).join('')}</div>${job.error ? `<div class="operation-error">${escapeOps(job.error)}</div>` : ''}`;
 }
 
 function renderServices(data) {
-  serviceList.innerHTML = data.services.map(service => `<article class="service-row"><div><div class="service-name"><strong>${escapeOps(serviceLabels[service.name] || service.name)}</strong><span class="status ${service.status}">${escapeOps(service.status)}</span></div><p>Last ${dateTime(service.last_run_at)} · ${service.fixed_schedule ? escapeOps(service.schedule_label) : `Next ${dateTime(service.next_run_at)}`}${service.last_error ? ` · ${escapeOps(service.last_error)}` : ''}</p></div><div class="service-actions">${data.can_manage ? `${service.fixed_schedule ? `<span>${escapeOps(service.schedule_label)}</span>` : `<label class="interval-control"><span>Interval</span><input type="number" min="30" step="30" value="${service.interval_seconds}" data-interval="${service.name}"><small>${intervalLabel(service.interval_seconds)}</small></label>`}<label class="switch" title="Enable ${escapeOps(service.name)}"><input type="checkbox" data-toggle="${service.name}" ${service.enabled ? 'checked' : ''}><span></span></label><button class="secondary-button" data-run="${service.name}"><i data-lucide="play"></i><span>Run now</span></button>` : `<span>${service.fixed_schedule ? escapeOps(service.schedule_label) : intervalLabel(service.interval_seconds)}</span>`}</div></article>`).join('');
+  const order = {stocks: 0, stock_reconciliation: 1, receipts: 2, products: 3, stores: 4};
+  const services = [...data.services].sort((a, b) => (order[a.name] ?? 99) - (order[b.name] ?? 99));
+  serviceList.innerHTML = services.map(service => {
+    const runLabel = service.name === 'stock_reconciliation' ? 'Reconcile now' : service.name === 'stocks' ? 'Sync now' : 'Run now';
+    const active = ['running', 'queued'].includes(service.status);
+    return `<article class="service-row"><div><div class="service-name"><strong>${escapeOps(serviceLabels[service.name] || service.name)}</strong><span class="status ${service.status}">${escapeOps(service.status)}</span></div><p class="service-description">${escapeOps(service.description)}</p><p>Last ${dateTime(service.last_run_at)} · ${service.fixed_schedule ? escapeOps(service.schedule_label) : `Next ${dateTime(service.next_run_at)}`}${service.last_error ? ` · ${escapeOps(service.last_error)}` : ''}</p></div><div class="service-actions">${data.can_manage ? `${service.fixed_schedule ? `<span class="schedule-chip">${escapeOps(service.schedule_label)}</span>` : `<label class="interval-control"><span>Interval</span><input type="number" min="30" max="86400" step="30" value="${service.interval_seconds}" data-interval="${service.name}" ${active ? 'disabled' : ''}><small>${intervalLabel(service.interval_seconds)}</small></label>`}<label class="switch" title="Enable ${escapeOps(service.name)}"><input type="checkbox" data-toggle="${service.name}" ${service.enabled ? 'checked' : ''} ${active ? 'disabled' : ''}><span></span></label><button class="secondary-button" data-run="${service.name}" ${active ? 'disabled' : ''}><i data-lucide="play"></i><span>${runLabel}</span></button>` : `<span>${service.fixed_schedule ? escapeOps(service.schedule_label) : intervalLabel(service.interval_seconds)}</span>`}</div></article>`;
+  }).join('');
+}
+
+function renderStockSync(data) {
+  const stock = data.stock_sync;
+  const badge = document.getElementById('stock-health-badge');
+  const healthClass = stock.health === 'healthy' ? 'success' : stock.health;
+  badge.className = `status ${healthClass}`;
+  badge.textContent = stock.health;
+  const latest = stock.latest_incremental;
+  const reconciliation = stock.latest_reconciliation;
+  const [nightlyTime, ...nightlyZoneParts] = stock.nightly_schedule.split(' ');
+  const nightlyZone = nightlyZoneParts.join(' ');
+  document.getElementById('stock-sync-summary').innerHTML = `
+    <div><span>Current stores</span><strong>${stock.current} / ${stock.stores_total}</strong><small>Fresh within ${ageLabel(stock.stale_after_seconds)}</small></div>
+    <div><span>Needs attention</span><strong>${stock.stale + stock.missing}</strong><small>${stock.stale} stale · ${stock.missing} missing</small></div>
+    <div><span>Incremental polling</span><strong>${intervalLabel(stock.interval_seconds)}</strong><small>${stock.page_size.toLocaleString()} records per page</small></div>
+    <div><span>Latest incremental</span><strong>${latest ? duration(latest.duration_ms) : 'Not run'}</strong><small>${latest ? `${latest.changed.toLocaleString()} changed · ${dateTime(latest.finished_at)}` : 'Waiting for first run'}</small></div>
+    <div><span>Nightly reconciliation</span><strong>${escapeOps(nightlyTime)}</strong><small>${escapeOps(nightlyZone)} · ${reconciliation ? `Last ${dateTime(reconciliation.finished_at)} · ${duration(reconciliation.duration_ms)}` : 'Not run yet'}</small></div>`;
+  stockStoreList.innerHTML = stock.stores.length ? stock.stores.map(store => {
+    const statusClass = store.status === 'current' ? 'success' : store.status === 'stale' ? 'warning' : 'error';
+    return `<tr><td><strong>${escapeOps(store.number)}</strong><small>${escapeOps(store.name)}</small></td><td><span class="status ${statusClass}">${escapeOps(store.status)}</span></td><td>${dateTime(store.last_synced_at)}</td><td>${ageLabel(store.age_seconds)}</td><td>${Number(store.last_revision || 0).toLocaleString()}</td><td>${Number(store.stock_records || 0).toLocaleString()}</td></tr>`;
+  }).join('') : '<tr><td colspan="6">No active warehouse stores.</td></tr>';
 }
 
 function renderTables(data) {
@@ -63,12 +99,13 @@ function renderTables(data) {
 async function loadOperations() {
   const data = await apiFetch('/api/operations/services/');
   operationsData = data;
-  document.getElementById('ops-counts').innerHTML = Object.entries(data.counts).map(([name, value]) => `<div><span>${escapeOps(name.replace('_', ' '))}</span><strong>${Number(value).toLocaleString()}</strong></div>`).join('');
+  document.getElementById('ops-counts').innerHTML = Object.entries(data.counts).map(([name, value]) => `<div><span>${escapeOps(countLabels[name] || name.replaceAll('_', ' '))}</span><strong>${Number(value).toLocaleString()}</strong></div>`).join('');
   document.getElementById('ops-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
-  renderFullSync(data); renderServices(data); renderTables(data);
+  renderStockSync(data); renderFullSync(data); renderServices(data); renderTables(data);
   lucide.createIcons();
   clearTimeout(operationsTimer);
-  if (data.full_sync && ['queued', 'running'].includes(data.full_sync.status)) operationsTimer = setTimeout(loadOperations, 3000);
+  const active = (data.full_sync && ['queued', 'running'].includes(data.full_sync.status)) || data.services.some(service => ['queued', 'running'].includes(service.status));
+  operationsTimer = setTimeout(() => loadOperations().catch(error => showToast(error.message, true)), active ? 3000 : 15000);
 }
 
 serviceList.addEventListener('change', async event => {
@@ -84,7 +121,7 @@ serviceList.addEventListener('change', async event => {
 serviceList.addEventListener('click', async event => {
   const button = event.target.closest('[data-run]'); if (!button) return;
   button.disabled = true;
-  try { await apiFetch(`/api/operations/services/${button.dataset.run}/run/`, {method: 'POST'}); showToast('Sync queued'); await loadOperations(); }
+  try { await apiFetch(`/api/operations/services/${button.dataset.run}/run/`, {method: 'POST'}); showToast('Sync queued'); await loadOperations(); clearTimeout(operationsTimer); operationsTimer = setTimeout(() => loadOperations().catch(error => showToast(error.message, true)), 1000); }
   catch (error) { showToast(error.message, true); button.disabled = false; }
 });
 

@@ -72,6 +72,8 @@ Order-list stock and monthly values have saved snapshots, but the API displays n
 
 Stock timing, paging, timeout, and retry behavior is configurable using the `KORONA_STOCK_*` and `KORONA_HTTP_*` variables in `.env.example`. The administrator Operations page exposes the incremental and reconciliation services separately.
 
+The Operations page also reports per-store cursor freshness, last successful poll, revision number, cached stock-row count, incremental run duration, stale/missing stores, and the latest nightly reconciliation. It refreshes automatically while open and more frequently while a job is running.
+
 ## Rollback
 
 Production changes should be reverted with a new Git commit so history remains auditable:

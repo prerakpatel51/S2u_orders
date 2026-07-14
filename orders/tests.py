@@ -22,6 +22,7 @@ from .models import (
     ServiceControl,
     Store,
     SyncState,
+    SyncRun,
 )
 from .services import (
     STOCK_SYNC_ENTITY,
@@ -660,6 +661,62 @@ class OrderApiTests(TestCase):
             ).status_code,
             403,
         )
+
+    def test_operations_api_reports_per_store_stock_cursor_health(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+        self.store.is_warehouse = True
+        self.store.save(update_fields=["is_warehouse"])
+        product = Product.objects.create(
+            korona_id=uuid.uuid4(), number="OPS-1", name="Ops Stock", normalized_name="opsstock"
+        )
+        ProductStock.objects.create(product=product, store=self.store, actual=4)
+        SyncState.objects.create(
+            entity=STOCK_SYNC_ENTITY,
+            store=self.store,
+            last_revision=456,
+            last_synced_at=timezone.now(),
+        )
+        SyncRun.objects.create(
+            job_name="stocks",
+            status=SyncRun.Status.SUCCESS,
+            finished_at=timezone.now(),
+            duration_ms=1200,
+            records_seen=3,
+            records_updated=3,
+        )
+
+        response = self.client.get("/api/operations/services/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["counts"]["active_stores"], 1)
+        self.assertEqual(payload["stock_sync"]["health"], "healthy")
+        self.assertEqual(payload["stock_sync"]["current"], 1)
+        self.assertEqual(payload["stock_sync"]["latest_incremental"]["changed"], 3)
+        self.assertEqual(payload["stock_sync"]["stores"][0]["last_revision"], 456)
+        self.assertEqual(payload["stock_sync"]["stores"][0]["stock_records"], 1)
+        self.assertIn("description", payload["services"][0])
+
+    def test_operations_rejects_invalid_or_fixed_schedule_intervals(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+
+        invalid = self.client.patch(
+            "/api/operations/services/",
+            {"service_name": "stocks", "interval_seconds": "fast"},
+            content_type="application/json",
+        )
+        fixed = self.client.patch(
+            "/api/operations/services/",
+            {"service_name": "stock_reconciliation", "interval_seconds": 300},
+            content_type="application/json",
+        )
+
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(fixed.status_code, 400)
 
     def test_normal_user_gets_only_the_restricted_working_columns(self):
         order_list = OrderList.objects.create(

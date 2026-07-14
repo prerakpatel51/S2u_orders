@@ -38,6 +38,7 @@ from .models import (
     ProductStock,
     ServiceControl,
     Store,
+    SyncState,
     SyncRun,
     SystemLog,
     UserGridPreference,
@@ -759,17 +760,107 @@ class ServicesAPIView(APIView):
     def get(self, request):
         for name, (_, interval) in SERVICES.items():
             ServiceControl.objects.get_or_create(service_name=name, defaults={"interval_seconds": interval})
-        controls = ServiceControl.objects.order_by("service_name")
+        controls = list(ServiceControl.objects.filter(service_name__in=SERVICES).order_by("service_name"))
+        control_by_name = {row.service_name: row for row in controls}
         runs = SyncRun.objects.order_by("-started_at")[:40]
         full_sync = FullSyncJob.objects.select_related("initiated_by").first()
+        warehouse_stores = list(Store.objects.filter(active=True, is_warehouse=True).order_by("number", "name"))
+        store_ids = [store.id for store in warehouse_stores]
+        stock_states = {
+            row.store_id: row
+            for row in SyncState.objects.filter(entity="stocks_by_store", store_id__in=store_ids)
+        }
+        stock_counts = {
+            row["store_id"]: row["total"]
+            for row in ProductStock.objects.filter(store_id__in=store_ids)
+            .values("store_id")
+            .annotate(total=Count("id"))
+        }
+        stock_control = control_by_name["stocks"]
+        stale_after_seconds = max(stock_control.interval_seconds * 2 + 60, 300)
+        now = timezone.now()
+        stock_stores = []
+        for store in warehouse_stores:
+            state = stock_states.get(store.id)
+            age_seconds = (
+                max(0, int((now - state.last_synced_at).total_seconds()))
+                if state and state.last_synced_at
+                else None
+            )
+            store_status = (
+                "missing"
+                if not state or not state.last_revision
+                else "stale"
+                if age_seconds is None or age_seconds > stale_after_seconds
+                else "current"
+            )
+            stock_stores.append(
+                {
+                    "id": store.id,
+                    "number": store.number,
+                    "name": store.name,
+                    "status": store_status,
+                    "last_revision": state.last_revision if state else 0,
+                    "last_synced_at": state.last_synced_at if state else None,
+                    "age_seconds": age_seconds,
+                    "stock_records": stock_counts.get(store.id, 0),
+                }
+            )
+        stock_status_counts = {
+            status_name: sum(row["status"] == status_name for row in stock_stores)
+            for status_name in ("current", "stale", "missing")
+        }
+        latest_stock_run = SyncRun.objects.filter(
+            job_name="stocks", status=SyncRun.Status.SUCCESS
+        ).order_by("-started_at").first()
+        latest_reconciliation = SyncRun.objects.filter(
+            job_name="stock_reconciliation", status=SyncRun.Status.SUCCESS
+        ).order_by("-started_at").first()
+        stock_health = (
+            "error"
+            if stock_control.status == ServiceControl.Status.ERROR
+            else "warning"
+            if stock_status_counts["stale"] or stock_status_counts["missing"]
+            else "healthy"
+        )
         return Response(
             {
                 "can_manage": True,
                 "counts": {
-                    "stores": Store.objects.count(),
+                    "active_stores": len(warehouse_stores),
                     "products": Product.objects.count(),
-                    "stocks": ProductStock.objects.count(),
-                    "rolling_totals": ProductMonthlyNeed.objects.filter(month=month_start()).count(),
+                    "stock_records": ProductStock.objects.count(),
+                    "thirty_day_totals": ProductMonthlyNeed.objects.filter(month=month_start()).count(),
+                },
+                "stock_sync": {
+                    "health": stock_health,
+                    "enabled": stock_control.enabled,
+                    "interval_seconds": stock_control.interval_seconds,
+                    "stale_after_seconds": stale_after_seconds,
+                    "page_size": settings.KORONA_STOCK_PAGE_SIZE,
+                    "stores_total": len(stock_stores),
+                    **stock_status_counts,
+                    "latest_incremental": {
+                        "finished_at": latest_stock_run.finished_at,
+                        "duration_ms": latest_stock_run.duration_ms,
+                        "seen": latest_stock_run.records_seen,
+                        "changed": latest_stock_run.records_created + latest_stock_run.records_updated,
+                    }
+                    if latest_stock_run
+                    else None,
+                    "latest_reconciliation": {
+                        "finished_at": latest_reconciliation.finished_at,
+                        "duration_ms": latest_reconciliation.duration_ms,
+                        "seen": latest_reconciliation.records_seen,
+                        "changed": latest_reconciliation.records_created + latest_reconciliation.records_updated,
+                    }
+                    if latest_reconciliation
+                    else None,
+                    "nightly_schedule": (
+                        f"{settings.KORONA_STOCK_RECONCILE_HOUR:02d}:"
+                        f"{settings.KORONA_STOCK_RECONCILE_MINUTE:02d} {settings.TIME_ZONE}"
+                    ),
+                    "stores": stock_stores,
                 },
                 "full_sync": serialize_full_sync(full_sync) if full_sync else None,
                 "services": [
@@ -789,6 +880,13 @@ class ServicesAPIView(APIView):
                             if row.service_name == "stock_reconciliation"
                             else ""
                         ),
+                        "description": {
+                            "stocks": "Polls each store revision cursor and applies only changed stock rows.",
+                            "stock_reconciliation": "Downloads every store stock record and repairs cache drift.",
+                            "receipts": "Imports receipt revisions and recalculates affected rolling 30-day totals.",
+                            "products": "Imports changed products, barcodes, suppliers and commodity groups.",
+                            "stores": "Imports changed organizational units and warehouse settings.",
+                        }.get(row.service_name, ""),
                     }
                     for row in controls
                 ],
@@ -820,10 +918,20 @@ class ServicesAPIView(APIView):
     def patch(self, request):
         control = get_object_or_404(ServiceControl, service_name=request.data.get("service_name"))
         if "enabled" in request.data:
+            if not isinstance(request.data["enabled"], bool):
+                return Response({"enabled": "Use true or false."}, status=400)
             control.enabled = bool(request.data["enabled"])
             control.status = ServiceControl.Status.IDLE if control.enabled else ServiceControl.Status.DISABLED
         if "interval_seconds" in request.data:
-            control.interval_seconds = max(30, int(request.data["interval_seconds"]))
+            if control.service_name == "stock_reconciliation":
+                return Response({"interval_seconds": "The nightly time is configured by environment."}, status=400)
+            try:
+                interval_seconds = int(request.data["interval_seconds"])
+            except (TypeError, ValueError):
+                return Response({"interval_seconds": "Enter a whole number of seconds."}, status=400)
+            if not 30 <= interval_seconds <= 86400:
+                return Response({"interval_seconds": "Choose between 30 and 86400 seconds."}, status=400)
+            control.interval_seconds = interval_seconds
         control.updated_by = request.user
         control.save()
         return Response({"ok": True})
