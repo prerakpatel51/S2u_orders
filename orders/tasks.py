@@ -2,24 +2,27 @@ import logging
 from datetime import timedelta
 
 from celery import shared_task
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
 from .full_sync import run_full_sync_step
 from .models import FullSyncJob, ServiceControl, SyncRun, SystemLog
-from .services import sync_products, sync_receipts, sync_stocks, sync_stores
+from .services import reconcile_stocks, sync_products, sync_receipts, sync_stocks, sync_stores
 
 logger = logging.getLogger(__name__)
 
 SERVICES = {
     "stores": (sync_stores, 1800),
     "products": (sync_products, 900),
-    "stocks": (sync_stocks, 300),
+    "stocks": (sync_stocks, settings.KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS),
+    "stock_reconciliation": (reconcile_stocks, settings.KORONA_STOCK_RECONCILE_INTERVAL_SECONDS),
     "receipts": (sync_receipts, 120),
 }
+STOCK_SERVICES = {"stocks", "stock_reconciliation"}
 
 
-def run_controlled(service_name, force=False):
+def run_controlled(service_name, force=False, ignore_interval=False):
     function, default_interval = SERVICES[service_name]
     control, _ = ServiceControl.objects.get_or_create(
         service_name=service_name, defaults={"interval_seconds": default_interval}
@@ -33,8 +36,14 @@ def run_controlled(service_name, force=False):
         control.save(update_fields=["status", "updated_at"])
         SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
         return {"skipped": True, "reason": "disabled"}
-    if not force and control.next_run_at and control.next_run_at > now:
+    if not force and not ignore_interval and control.next_run_at and control.next_run_at > now:
         return {"skipped": True, "reason": "not due"}
+    if service_name in STOCK_SERVICES and ServiceControl.objects.filter(
+        service_name__in=STOCK_SERVICES,
+        locked_until__gt=now,
+    ).exclude(pk=control.pk).exists():
+        SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
+        return {"skipped": True, "reason": "another stock synchronization is running"}
     if control.locked_until and control.locked_until > now:
         return {"skipped": True, "reason": "already running"}
     control.status = ServiceControl.Status.RUNNING
@@ -55,7 +64,11 @@ def run_controlled(service_name, force=False):
         run.save()
         control.status = ServiceControl.Status.IDLE if control.enabled else ServiceControl.Status.DISABLED
         control.last_run_at = finished
-        control.next_run_at = finished + timedelta(seconds=control.interval_seconds)
+        control.next_run_at = (
+            None
+            if service_name == "stock_reconciliation"
+            else finished + timedelta(seconds=control.interval_seconds)
+        )
         return counts
     except Exception as exc:
         logger.exception("Sync service %s failed", service_name)
@@ -87,6 +100,11 @@ def sync_products_task(force=False):
 @shared_task(name="orders.tasks.sync_stocks_task")
 def sync_stocks_task(force=False):
     return run_controlled("stocks", force)
+
+
+@shared_task(name="orders.tasks.reconcile_stocks_task")
+def reconcile_stocks_task(force=False):
+    return run_controlled("stock_reconciliation", force, ignore_interval=True)
 
 
 @shared_task(name="orders.tasks.sync_receipts_task")

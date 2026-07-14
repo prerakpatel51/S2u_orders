@@ -3,6 +3,7 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -142,27 +143,175 @@ def refresh_product_stocks(product, client=None):
     return counts
 
 
-def sync_stocks(limit=100):
-    priority_ids = list(
-        Product.objects.filter(orderlistitem__order_list__status="draft")
-        .values_list("id", flat=True)
-        .distinct()[:limit]
-    )
-    products = list(Product.objects.filter(id__in=priority_ids).order_by("stock_last_synced_at", "id"))
-    remaining = limit - len(products)
-    if remaining > 0:
-        products.extend(
-            Product.objects.filter(active=True, track_inventory=True)
-            .exclude(id__in=priority_ids)
-            .order_by("stock_last_synced_at", "id")[:remaining]
+STOCK_SYNC_ENTITY = "stocks_by_store"
+
+
+def _download_store_stocks(store, client, revision=None):
+    rows = []
+    max_revision = int(revision or 0)
+    for page, page_revision in client.organizational_unit_product_stocks(
+        store.korona_id,
+        revision=revision,
+        page_size=settings.KORONA_STOCK_PAGE_SIZE,
+    ):
+        rows.extend(page)
+        max_revision = max(
+            max_revision,
+            int(page_revision or 0),
+            max((int(row.get("revision") or 0) for row in page), default=0),
         )
+    return rows, max_revision
+
+
+def _bulk_upsert_store_stocks(store, rows, now):
+    row_by_product = {
+        str(product_id): row
+        for row in rows
+        if (product_id := reference_id(row.get("product")))
+    }
+    products = {
+        str(product.korona_id): product
+        for product in Product.objects.filter(korona_id__in=row_by_product)
+    }
+    missing_product_ids = set(row_by_product) - set(products)
+    existing_product_ids = set(
+        ProductStock.objects.filter(
+            store=store,
+            product_id__in=[product.id for product in products.values()],
+        ).values_list("product_id", flat=True)
+    )
+    stock_rows = []
+    for korona_id, product in products.items():
+        data = row_by_product[korona_id]
+        amount = data.get("amount") or {}
+        stock_rows.append(
+            ProductStock(
+                product=product,
+                store=store,
+                actual=decimal_value(amount.get("actual")),
+                ordered=decimal_value(amount.get("ordered")),
+                lent=decimal_value(amount.get("lent")),
+                reorder_level=decimal_value(amount.get("reorderLevel")),
+                max_level=decimal_value(amount.get("maxLevel")),
+                revision=data.get("revision") or 0,
+                last_synced_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    if stock_rows:
+        ProductStock.objects.bulk_create(
+            stock_rows,
+            update_conflicts=True,
+            unique_fields=["product", "store"],
+            update_fields=[
+                "actual",
+                "ordered",
+                "lent",
+                "reorder_level",
+                "max_level",
+                "revision",
+                "last_synced_at",
+                "updated_at",
+            ],
+            batch_size=1000,
+        )
+        Product.objects.filter(id__in=[product.id for product in products.values()]).update(
+            stock_last_synced_at=now
+        )
+    return {
+        "seen": len(stock_rows),
+        "created": len(stock_rows) - len(existing_product_ids),
+        "updated": len(existing_product_ids),
+        "missing_product_ids": missing_product_ids,
+        "product_ids": {product.id for product in products.values()},
+    }
+
+
+def sync_store_stocks_incremental(store, client=None):
+    client = client or KoronaClient()
+    state, _ = SyncState.objects.get_or_create(entity=STOCK_SYNC_ENTITY, store=store)
+    requested_revision = state.last_revision or None
+    rows, max_revision = _download_store_stocks(store, client, requested_revision)
+    now = timezone.now()
+    with transaction.atomic():
+        counts = _bulk_upsert_store_stocks(store, rows, now)
+        state = SyncState.objects.select_for_update().get(pk=state.pk)
+        state.last_synced_at = now
+        if not counts["missing_product_ids"]:
+            state.last_revision = max(state.last_revision, max_revision)
+        else:
+            logger.warning(
+                "Stock cursor for store %s was not advanced because %s products are not synchronized yet",
+                store.number,
+                len(counts["missing_product_ids"]),
+            )
+        state.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
+    counts["deferred"] = len(counts.pop("missing_product_ids"))
+    counts.pop("product_ids")
+    return counts
+
+
+def reconcile_store_stocks(store, client=None):
+    client = client or KoronaClient()
+    rows, max_revision = _download_store_stocks(store, client)
+    now = timezone.now()
+    with transaction.atomic():
+        counts = _bulk_upsert_store_stocks(store, rows, now)
+        missing_local = ProductStock.objects.filter(store=store).exclude(
+            product_id__in=counts["product_ids"]
+        )
+        reset_count = missing_local.exclude(
+            actual=0,
+            ordered=0,
+            lent=0,
+            reorder_level=0,
+            max_level=0,
+        ).count()
+        missing_local.update(
+            actual=0,
+            ordered=0,
+            lent=0,
+            reorder_level=0,
+            max_level=0,
+            last_synced_at=now,
+            updated_at=now,
+        )
+        state, _ = SyncState.objects.select_for_update().get_or_create(
+            entity=STOCK_SYNC_ENTITY, store=store
+        )
+        state.last_synced_at = now
+        if not counts["missing_product_ids"]:
+            state.last_revision = max_revision
+        else:
+            logger.warning(
+                "Reconciliation cursor for store %s was not advanced because %s products are not synchronized yet",
+                store.number,
+                len(counts["missing_product_ids"]),
+            )
+        state.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
+    counts["updated"] += reset_count
+    counts["deferred"] = len(counts.pop("missing_product_ids"))
+    counts.pop("product_ids")
+    return counts
+
+
+def _sync_all_stores(function):
     client = KoronaClient()
-    totals = {"seen": 0, "created": 0, "updated": 0}
-    for product in products:
-        counts = refresh_product_stocks(product, client)
+    totals = {"seen": 0, "created": 0, "updated": 0, "deferred": 0}
+    for store in Store.objects.filter(active=True, is_warehouse=True).order_by("number", "id"):
+        counts = function(store, client)
         for key in totals:
-            totals[key] += counts[key]
+            totals[key] += counts.get(key, 0)
     return totals
+
+
+def sync_stocks():
+    return _sync_all_stores(sync_store_stocks_incremental)
+
+
+def reconcile_stocks():
+    return _sync_all_stores(reconcile_store_stocks)
 
 
 def recalculate_monthly_need(store_id, product_id, target_month=None):

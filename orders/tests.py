@@ -19,11 +19,131 @@ from .models import (
     ProductStock,
     ReceiptSaleLine,
     SalesDailySummary,
+    ServiceControl,
     Store,
+    SyncState,
 )
-from .services import _apply_receipt, recalculate_monthly_need, recalculate_stale_monthly_needs
+from .services import (
+    STOCK_SYNC_ENTITY,
+    _apply_receipt,
+    recalculate_monthly_need,
+    recalculate_stale_monthly_needs,
+    reconcile_store_stocks,
+    sync_store_stocks_incremental,
+)
 from .full_sync import initialize_full_sync, run_full_sync_step
 from .serializers import supplier_short_name
+from .tasks import reconcile_stocks_task
+
+
+class FakeStoreStockClient:
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def organizational_unit_product_stocks(self, store_id, revision=None, page_size=None):
+        self.calls.append({"store_id": store_id, "revision": revision, "page_size": page_size})
+        return iter(self.pages)
+
+
+class StoreStockSyncTests(TestCase):
+    def setUp(self):
+        self.store = Store.objects.create(
+            korona_id=uuid.uuid4(), number="3210", name="Main", is_warehouse=True
+        )
+        self.product = Product.objects.create(
+            korona_id=uuid.uuid4(), number="100", name="Test Bottle", normalized_name="testbottle"
+        )
+
+    def stock_row(self, product=None, *, actual=7, revision=20):
+        return {
+            "product": {"id": str((product or self.product).korona_id)},
+            "warehouse": {"id": str(self.store.korona_id)},
+            "revision": revision,
+            "amount": {
+                "actual": actual,
+                "ordered": 2,
+                "lent": 1,
+                "reorderLevel": 3,
+                "maxLevel": 12,
+            },
+        }
+
+    def test_incremental_sync_uses_store_cursor_and_bulk_updates_stock(self):
+        ProductStock.objects.create(product=self.product, store=self.store, actual=99, revision=10)
+        SyncState.objects.create(entity=STOCK_SYNC_ENTITY, store=self.store, last_revision=10)
+        client = FakeStoreStockClient([([self.stock_row()], 20)])
+
+        counts = sync_store_stocks_incremental(self.store, client)
+
+        stock = ProductStock.objects.get(product=self.product, store=self.store)
+        state = SyncState.objects.get(entity=STOCK_SYNC_ENTITY, store=self.store)
+        self.assertEqual(stock.actual, Decimal("7"))
+        self.assertEqual(stock.ordered, Decimal("2"))
+        self.assertEqual(stock.lent, Decimal("1"))
+        self.assertEqual(stock.revision, 20)
+        self.assertEqual(state.last_revision, 20)
+        self.assertEqual(client.calls[0]["revision"], 10)
+        self.assertEqual(counts, {"seen": 1, "created": 0, "updated": 1, "deferred": 0})
+
+    def test_incremental_cursor_does_not_advance_past_unknown_product(self):
+        SyncState.objects.create(entity=STOCK_SYNC_ENTITY, store=self.store, last_revision=10)
+        unknown = Product(
+            korona_id=uuid.uuid4(), number="missing", name="Missing", normalized_name="missing"
+        )
+        client = FakeStoreStockClient([([self.stock_row(unknown, revision=21)], 21)])
+
+        counts = sync_store_stocks_incremental(self.store, client)
+
+        state = SyncState.objects.get(entity=STOCK_SYNC_ENTITY, store=self.store)
+        self.assertEqual(state.last_revision, 10)
+        self.assertEqual(counts["deferred"], 1)
+
+    def test_full_reconciliation_resets_stock_not_returned_by_korona(self):
+        missing_product = Product.objects.create(
+            korona_id=uuid.uuid4(), number="200", name="Old Stock", normalized_name="oldstock"
+        )
+        ProductStock.objects.create(
+            product=missing_product,
+            store=self.store,
+            actual=8,
+            ordered=4,
+            lent=2,
+            reorder_level=1,
+            max_level=10,
+        )
+        client = FakeStoreStockClient([([self.stock_row(actual=5, revision=30)], 30)])
+
+        counts = reconcile_store_stocks(self.store, client)
+
+        stale = ProductStock.objects.get(product=missing_product, store=self.store)
+        current = ProductStock.objects.get(product=self.product, store=self.store)
+        state = SyncState.objects.get(entity=STOCK_SYNC_ENTITY, store=self.store)
+        self.assertEqual(current.actual, Decimal("5"))
+        self.assertEqual(stale.actual, Decimal("0"))
+        self.assertEqual(stale.ordered, Decimal("0"))
+        self.assertEqual(stale.lent, Decimal("0"))
+        self.assertEqual(state.last_revision, 30)
+        self.assertEqual(counts["created"], 1)
+        self.assertEqual(counts["updated"], 1)
+
+    @patch("orders.tasks.reconcile_stocks", return_value={"seen": 0, "created": 0, "updated": 0})
+    def test_nightly_task_ignores_interval_gate_but_keeps_fixed_schedule(self, reconcile):
+        control, _ = ServiceControl.objects.get_or_create(service_name="stock_reconciliation")
+        control.enabled = True
+        control.next_run_at = timezone.now() + timedelta(hours=12)
+        control.save()
+
+        with patch.dict(
+            "orders.tasks.SERVICES",
+            {"stock_reconciliation": (reconcile, 86400)},
+        ):
+            result = reconcile_stocks_task()
+
+        control.refresh_from_db()
+        reconcile.assert_called_once_with()
+        self.assertEqual(result["seen"], 0)
+        self.assertIsNone(control.next_run_at)
 
 
 class ReceiptSyncTests(TestCase):

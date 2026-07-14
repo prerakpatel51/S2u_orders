@@ -6,7 +6,7 @@ const fullSyncDialog = document.getElementById('full-sync-dialog');
 let operationsTimer;
 let operationsData;
 
-const serviceLabels = {stores: 'Stores', products: 'Products & barcodes', stocks: 'Product stocks', receipts: 'Receipts & 30-day totals'};
+const serviceLabels = {stores: 'Stores', products: 'Products & barcodes', stocks: 'Stock changes', stock_reconciliation: 'Nightly stock reconciliation', receipts: 'Receipts & 30-day totals'};
 const stageLabels = {stores: 'Stores', products: 'Products', stocks: 'Stocks', receipts: 'Receipts', totals: '30-day totals'};
 const escapeOps = value => { const element = document.createElement('div'); element.textContent = value ?? ''; return element.innerHTML; };
 const dateTime = value => value ? new Date(value).toLocaleString() : 'Not run';
@@ -51,7 +51,7 @@ function renderFullSync(data) {
 }
 
 function renderServices(data) {
-  serviceList.innerHTML = data.services.map(service => `<article class="service-row"><div><div class="service-name"><strong>${escapeOps(serviceLabels[service.name] || service.name)}</strong><span class="status ${service.status}">${escapeOps(service.status)}</span></div><p>Last ${dateTime(service.last_run_at)} · Next ${dateTime(service.next_run_at)}${service.last_error ? ` · ${escapeOps(service.last_error)}` : ''}</p></div><div class="service-actions">${data.can_manage ? `<label class="interval-control"><span>Interval</span><input type="number" min="30" step="30" value="${service.interval_seconds}" data-interval="${service.name}"><small>${intervalLabel(service.interval_seconds)}</small></label><label class="switch" title="Enable ${escapeOps(service.name)}"><input type="checkbox" data-toggle="${service.name}" ${service.enabled ? 'checked' : ''}><span></span></label><button class="secondary-button" data-run="${service.name}"><i data-lucide="play"></i><span>Run now</span></button>` : `<span>${intervalLabel(service.interval_seconds)}</span>`}</div></article>`).join('');
+  serviceList.innerHTML = data.services.map(service => `<article class="service-row"><div><div class="service-name"><strong>${escapeOps(serviceLabels[service.name] || service.name)}</strong><span class="status ${service.status}">${escapeOps(service.status)}</span></div><p>Last ${dateTime(service.last_run_at)} · ${service.fixed_schedule ? escapeOps(service.schedule_label) : `Next ${dateTime(service.next_run_at)}`}${service.last_error ? ` · ${escapeOps(service.last_error)}` : ''}</p></div><div class="service-actions">${data.can_manage ? `${service.fixed_schedule ? `<span>${escapeOps(service.schedule_label)}</span>` : `<label class="interval-control"><span>Interval</span><input type="number" min="30" step="30" value="${service.interval_seconds}" data-interval="${service.name}"><small>${intervalLabel(service.interval_seconds)}</small></label>`}<label class="switch" title="Enable ${escapeOps(service.name)}"><input type="checkbox" data-toggle="${service.name}" ${service.enabled ? 'checked' : ''}><span></span></label><button class="secondary-button" data-run="${service.name}"><i data-lucide="play"></i><span>Run now</span></button>` : `<span>${service.fixed_schedule ? escapeOps(service.schedule_label) : intervalLabel(service.interval_seconds)}</span>`}</div></article>`).join('');
 }
 
 function renderTables(data) {

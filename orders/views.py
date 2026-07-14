@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.contrib.auth.password_validation import validate_password
@@ -780,6 +781,14 @@ class ServicesAPIView(APIView):
                         "last_run_at": row.last_run_at,
                         "next_run_at": row.next_run_at,
                         "last_error": row.last_error,
+                        "fixed_schedule": row.service_name == "stock_reconciliation",
+                        "schedule_label": (
+                            f"Daily at {settings.KORONA_STOCK_RECONCILE_HOUR:02d}:"
+                            f"{settings.KORONA_STOCK_RECONCILE_MINUTE:02d} "
+                            f"{settings.TIME_ZONE}"
+                            if row.service_name == "stock_reconciliation"
+                            else ""
+                        ),
                     }
                     for row in controls
                 ],
@@ -827,6 +836,7 @@ class ServiceRunAPIView(APIView):
         if service_name not in SERVICES:
             return Response({"detail": "Unknown service."}, status=404)
         from .tasks import (
+            reconcile_stocks_task,
             sync_products_task,
             sync_receipts_task,
             sync_stocks_task,
@@ -837,6 +847,7 @@ class ServiceRunAPIView(APIView):
             "stores": sync_stores_task,
             "products": sync_products_task,
             "stocks": sync_stocks_task,
+            "stock_reconciliation": reconcile_stocks_task,
             "receipts": sync_receipts_task,
         }[service_name].delay(force=True)
         return Response({"queued": True, "task_id": task.id}, status=202)

@@ -18,11 +18,10 @@ from .models import (
     Store,
     SyncState,
 )
-from .services import MONTHLY_NEED_VERSION, _apply_receipt, month_start, refresh_product_stocks
+from .services import MONTHLY_NEED_VERSION, STOCK_SYNC_ENTITY, _apply_receipt, month_start, reconcile_store_stocks
 from .utils import normalize_search_text
 
 PAGE_SIZE = 100
-STOCK_BATCH_SIZE = 25
 STAGES = [
     FullSyncJob.Stage.STORES,
     FullSyncJob.Stage.PRODUCTS,
@@ -66,7 +65,7 @@ def initialize_full_sync(job):
     ProductMonthlyNeed.objects.all().delete()
     ProductCode.objects.all().delete()
     SyncState.objects.filter(
-        entity__in=["stores", "products", "receipts", "receipts_live", "receipts_recent"]
+        entity__in=["stores", "products", "receipts", "receipts_live", "receipts_recent", STOCK_SYNC_ENTITY]
     ).delete()
     job.stage_progress = {}
     _advance(job, FullSyncJob.Stage.STORES)
@@ -159,34 +158,29 @@ def _catalog_step(job, client, *, entity, suffix, upsert, next_stage):
 
 
 def _stock_step(job, client):
-    last_id = int(job.checkpoint.get("last_product_id", 0))
-    total = int(job.checkpoint.get("total", 0)) or Product.objects.filter(
-        active=True, track_inventory=True
+    last_id = int(job.checkpoint.get("last_store_id", 0))
+    total = int(job.checkpoint.get("total", 0)) or Store.objects.filter(
+        active=True, is_warehouse=True
     ).count()
-    products = list(
-        Product.objects.filter(active=True, track_inventory=True, id__gt=last_id)
-        .order_by("id")[:STOCK_BATCH_SIZE]
-    )
-    for product in products:
-        refresh_product_stocks(product, client)
+    store = Store.objects.filter(active=True, is_warehouse=True, id__gt=last_id).order_by("id").first()
+    if store:
+        reconcile_store_stocks(store, client)
 
-    processed = min(int(job.checkpoint.get("processed", 0)) + len(products), total)
-    current_batch = math.ceil(processed / STOCK_BATCH_SIZE) if processed else 0
-    total_batches = math.ceil(total / STOCK_BATCH_SIZE) if total else 0
-    complete = not products or processed >= total
+    processed = min(int(job.checkpoint.get("processed", 0)) + (1 if store else 0), total)
+    complete = store is None or processed >= total
     _progress(
         job,
         processed=processed,
         total=total,
-        current_batch=current_batch,
-        total_batches=total_batches,
+        current_batch=processed,
+        total_batches=total,
         complete=complete,
     )
     if complete:
         _advance(job, FullSyncJob.Stage.RECEIPTS)
     else:
         job.checkpoint = {
-            "last_product_id": products[-1].id,
+            "last_store_id": store.id,
             "processed": processed,
             "total": total,
         }

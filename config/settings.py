@@ -3,13 +3,18 @@ from pathlib import Path
 
 import dj_database_url
 from dotenv import load_dotenv
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "unsafe-local-dev-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
-ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")]
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1],testserver").split(",")
+    if host.strip()
+]
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "https://*.ngrok-free.app").split(",")
@@ -127,6 +132,8 @@ CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+KORONA_STOCK_RECONCILE_HOUR = min(23, max(0, int(os.getenv("KORONA_STOCK_RECONCILE_HOUR", "3"))))
+KORONA_STOCK_RECONCILE_MINUTE = min(59, max(0, int(os.getenv("KORONA_STOCK_RECONCILE_MINUTE", "15"))))
 CELERY_BEAT_SCHEDULE = {
     "sync-korona-receipts": {
         "task": "orders.tasks.sync_receipts_task",
@@ -144,12 +151,30 @@ CELERY_BEAT_SCHEDULE = {
         "task": "orders.tasks.sync_stocks_task",
         "schedule": 30.0,
     },
+    "reconcile-korona-stocks-nightly": {
+        "task": "orders.tasks.reconcile_stocks_task",
+        "schedule": crontab(
+            hour=KORONA_STOCK_RECONCILE_HOUR,
+            minute=KORONA_STOCK_RECONCILE_MINUTE,
+        ),
+    },
 }
 
 KORONA_ACCOUNT_ID = os.getenv("KORONA_ACCOUNT_ID", "")
 KORONA_BASE_URL = os.getenv("KORONA_BASE_URL", "").rstrip("/")
 KORONA_USER = os.getenv("KORONA_USER", "")
 KORONA_PASSWORD = os.getenv("KORONA_PASSWORD", "")
+KORONA_CONNECT_TIMEOUT_SECONDS = float(os.getenv("KORONA_CONNECT_TIMEOUT_SECONDS", "5"))
+KORONA_READ_TIMEOUT_SECONDS = float(os.getenv("KORONA_READ_TIMEOUT_SECONDS", "45"))
+KORONA_HTTP_RETRIES = max(0, int(os.getenv("KORONA_HTTP_RETRIES", "3")))
+KORONA_HTTP_BACKOFF_SECONDS = max(0.0, float(os.getenv("KORONA_HTTP_BACKOFF_SECONDS", "0.5")))
+KORONA_STOCK_PAGE_SIZE = max(100, min(1000, int(os.getenv("KORONA_STOCK_PAGE_SIZE", "1000"))))
+KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS = max(
+    30, int(os.getenv("KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS", "120"))
+)
+KORONA_STOCK_RECONCILE_INTERVAL_SECONDS = max(
+    3600, int(os.getenv("KORONA_STOCK_RECONCILE_INTERVAL_SECONDS", "86400"))
+)
 
 LOGGING = {
     "version": 1,

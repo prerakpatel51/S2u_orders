@@ -51,15 +51,38 @@ All deployment-specific values are environment variables documented in `.env.exa
 - Keep `DJANGO_DEBUG=0` outside local development.
 - Use a unique, randomly generated `DJANGO_SECRET_KEY` in production.
 - Do not put credentials in source code or Docker images.
+- `.env` is excluded from both Git and the Docker build context; Compose injects it only at runtime.
 - Run exactly one Celery Beat instance.
 - Use TLS URLs in `CSRF_TRUSTED_ORIGINS` and for the public application endpoint.
 - Restrict access to PostgreSQL and Redis to the application network.
 
 ## Data synchronization
 
-KORONA stores and products are revision-synchronized. Receipt revisions update a compact receipt ledger by delta, and affected store/product rolling 30-day requirements are recalculated. Stock is cached locally and refreshed when products are selected as well as by background synchronization.
+KORONA stores and products are revision-synchronized. Receipt revisions update a compact receipt ledger by delta, and affected store/product rolling 30-day requirements are recalculated.
+
+Stock synchronization has three layers:
+
+- Every two minutes, the background service requests stock changes newer than each store's successfully committed revision cursor.
+- Product selection can refresh one product immediately for the order workflow.
+- At the configured nightly time, a complete store-by-store reconciliation repairs missing or stale local rows and resets stock records no longer returned by KORONA.
+
+The store stock endpoint is paged at up to 1,000 records. Revision cursors advance only after database writes commit successfully. A cursor does not advance when a stock row references a product that has not reached the local product catalog yet, allowing the next cycle to retry it safely. HTTP 429 and temporary server failures use bounded GET-only retries with exponential backoff.
 
 Order-list stock and monthly values have saved snapshots, but the API displays newer cache values when current records are available. User-entered shelf quantities, supplier quantities, transfers, and notes are not changed by synchronization jobs.
+
+Stock timing, paging, timeout, and retry behavior is configurable using the `KORONA_STOCK_*` and `KORONA_HTTP_*` variables in `.env.example`. The administrator Operations page exposes the incremental and reconciliation services separately.
+
+## Rollback
+
+Production changes should be reverted with a new Git commit so history remains auditable:
+
+```sh
+git log --oneline
+git revert <commit-to-revert>
+git push origin main
+```
+
+The initial imported application is preserved as commit `255ddb1`.
 
 ## Railway deployment
 
