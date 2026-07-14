@@ -1,0 +1,35 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Store Orders{% endblock %}</title>
+  <link rel="icon" href="data:,">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'orders/app.css' %}?v=20260712b">
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  {% if user.is_authenticated %}
+  <header class="app-header">
+    <a class="brand" href="{% url 'home' %}"><span class="brand-mark">SO</span><span>Store Orders</span></a>
+    <nav class="header-actions" aria-label="Account">
+      {% if user.is_staff or user.is_superuser %}<a class="icon-text-button subtle" href="{% url 'users' %}"><i data-lucide="users"></i><span>Users</span></a>{% endif %}
+      {% if user.is_superuser %}
+      <a class="icon-text-button subtle" href="{% url 'operations' %}"><i data-lucide="activity"></i><span>Operations</span></a>
+      {% endif %}
+      <span class="user-name">{{ user.get_short_name|default:user.username }}</span>
+      <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="icon-button" title="Log out" aria-label="Log out"><i data-lucide="log-out"></i></button></form>
+    </nav>
+  </header>
+  {% endif %}
+  <main class="app-main">{% block content %}{% endblock %}</main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="{% static 'orders/common.js' %}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

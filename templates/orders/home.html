@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Stores | Store Orders{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><p class="eyebrow">Order workspace</p><h1>Stores</h1><p>Select a store to open its order lists.</p></div>
+  <div class="page-actions">{% if user.is_staff or user.is_superuser %}<a href="{% url 'bulk-orders' %}" class="secondary-button"><i data-lucide="boxes"></i>Bulk orders</a>{% endif %}<a href="{% url 'inventory' %}" class="secondary-button"><i data-lucide="warehouse"></i>All-store inventory</a><button id="new-order-button" class="primary-button"><i data-lucide="plus"></i>Create order list</button></div>
+</section>
+<section id="store-grid" class="store-grid" aria-live="polite"><div class="loading-line">Loading stores...</div></section>
+
+<dialog id="new-order-dialog" class="modal">
+  <form id="new-order-form" method="dialog">
+    <div class="modal-header"><div><h2>Create order list</h2><p>Choose the store and working date.</p></div><button type="button" class="icon-button" data-close title="Close"><i data-lucide="x"></i></button></div>
+    <label>Store<select id="order-store" required></select></label>
+    <label>Date<input id="order-date" type="date" required></label>
+    <div class="modal-actions"><button type="button" class="secondary-button" data-close>Cancel</button><button type="submit" class="primary-button">Open list</button></div>
+  </form>
+</dialog>
+{% endblock %}
+{% block scripts %}<script>window.CAN_MANAGE_ORDER_LISTS={{ user.is_staff|yesno:"true,false" }}||{{ user.is_superuser|yesno:"true,false" }};</script><script src="{% static 'orders/home.js' %}?v=20260712a"></script>{% endblock %}

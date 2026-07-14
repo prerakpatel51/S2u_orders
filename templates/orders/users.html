@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Users | Store Orders{% endblock %}
+{% block content %}
+<section class="page-heading">
+  <div><p class="eyebrow">Access control</p><h1>Users</h1><p>Create accounts and choose who has administrator access.</p></div>
+  <button id="new-user-button" class="primary-button"><i data-lucide="user-plus"></i>Add user</button>
+</section>
+<section class="user-table-card"><div class="table-scroll"><table class="data-table"><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody id="user-list"><tr><td colspan="5">Loading users…</td></tr></tbody></table></div></section>
+<dialog id="user-dialog" class="modal"><form id="user-form">
+  <div class="modal-header"><div><h2>Add user</h2><p>The new user can sign in immediately.</p></div><button type="button" class="icon-button" data-close><i data-lucide="x"></i></button></div>
+  <label>Username<input id="user-username" autocomplete="username" required></label>
+  <div class="user-name-fields"><label>First name<input id="user-first-name"></label><label>Last name<input id="user-last-name"></label></div>
+  <label>Email<input id="user-email" type="email" autocomplete="email"></label>
+  <label>Password<input id="user-password" type="password" autocomplete="new-password" minlength="8" required></label>
+  <label class="inline-check"><input id="user-is-admin" type="checkbox"><span>Make this user an administrator</span></label>
+  <div class="modal-actions"><button type="button" class="secondary-button" data-close>Cancel</button><button type="submit" class="primary-button">Create user</button></div>
+</form></dialog>
+{% endblock %}
+{% block scripts %}<script>window.CURRENT_USER_ID={{ user.id }};</script><script src="{% static 'orders/users.js' %}?v=20260712a"></script>{% endblock %}

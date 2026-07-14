@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Sign in | Store Orders{% endblock %}
+{% block content %}
+<section class="login-shell">
+  <div class="login-panel">
+    <div class="brand login-brand"><span class="brand-mark">SO</span><span>Store Orders</span></div>
+    <h1>Sign in</h1>
+    <p>Use your assigned account to manage store order lists.</p>
+    {% if form.errors %}<div class="form-error">The username or password is incorrect.</div>{% endif %}
+    <form method="post" class="stack-form">
+      {% csrf_token %}
+      <label>Username<input name="username" autocomplete="username" required autofocus></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password" required></label>
+      {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+      <button class="primary-button" type="submit">Sign in</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

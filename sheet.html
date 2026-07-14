@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Free Web Spreadsheet Interface</title>
+    
+    <!-- 1. Load Jspreadsheet CSS and its dependency Jsuites -->
+    <script src="https://bossanova.uk"></script>
+    <link rel="stylesheet" src="https://bossanova.uk" type="text/css" />
+    <script src="https://jsuites.net"></script>
+    <link rel="stylesheet" src="https://jsuites.net" type="text/css" />
+</head>
+<body>
+
+    <h2 style="font-family: Arial, sans-serif;">My Dynamic Sheet Interface</h2>
+    
+    <!-- 2. The spreadsheet container -->
+    <div id="spreadsheet"></div>
+
+    <script>
+        // Initial sample data (Supports raw text, numbers, and Excel-style math formulas)
+        var initialData = [
+            ['Project Alpha', 'Development', '2500', '=C1*0.15'],
+            ['Project Beta', 'Design', '1800', '=C2*0.15'],
+            ['Project Gamma', 'QA & Testing', '1200', '=C3*0.15'],
+            ['Total Budget', '', '=SUM(C1:C3)', '=SUM(D1:D3)']
+        ];
+
+        // 3. Initialize the sheet interface with your required features
+        jspreadsheet(document.getElementById('spreadsheet'), {
+            data: initialData,
+            rowDrag: true,           // Allows users to reorder rows by dragging
+            columnSorting: true,     // Click a column header to instantly sort alphabetically/numerically
+            columnResize: true,      // Drag column edges to change width manually
+            rowResize: true,         // Drag row edges to change height manually
+            
+            // Define your column parameters, types, and alignments
+            columns: [
+                { type: 'text', title: 'Task Name', width: 160, align: 'left' },
+                { type: 'text', title: 'Department', width: 140, align: 'center' },
+                { type: 'numeric', title: 'Cost ($)', width: 100, mask: '$ #.##0,00', align: 'right' },
+                { type: 'numeric', title: 'Tax Estimate', width: 120, mask: '$ #.##0,00', align: 'right' }
+            ],
+            
+            // Enables standard text styling behaviors 
+            wordWrap: true,          // Wraps extra long lines inside cells cleanly
+            allowComments: true      // Allows right-clicking cells to add notes
+        });
+    </script>
+
+</body>
+</html>

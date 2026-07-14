@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Store {{ order_list.store.number }} | Store Orders{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-grid.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-theme-quartz.css">
+{% endblock %}
+{% block content %}
+<section class="sheet-heading">
+  <div class="sheet-title"><a href="{% url 'home' %}" class="back-link"><i data-lucide="arrow-left"></i></a><div><p class="eyebrow">{{ order_list.order_date }} · {{ order_list.get_status_display }}</p><h1>Store {{ order_list.store.number }}</h1></div></div>
+  <div class="toolbar-group">
+    <button id="list-note-button" class="icon-text-button{% if is_order_admin and order_list.notes %} has-note-attention{% endif %}"><i data-lucide="notebook-pen"></i><span>List note</span><span class="note-alert-dot" aria-hidden="true"></span></button>
+    <button id="columns-button" class="icon-text-button" aria-expanded="false"><i data-lucide="columns-3"></i><span>Columns</span></button>
+    <button id="freeze-button" class="icon-text-button active" aria-expanded="false" {% if not is_order_admin %}hidden{% endif %}><i data-lucide="pin"></i><span>Freeze columns</span></button>
+    <button id="reset-format-button" class="icon-text-button" title="Restore default column format" {% if not is_order_admin %}hidden{% endif %}><i data-lucide="rotate-ccw"></i><span>Reset format</span></button>
+    <button id="other-stores-button" class="toggle-button" aria-pressed="false" {% if not is_order_admin %}hidden{% endif %}><span>Stores, distributors & transfers</span><span class="toggle-track"><span></span></span></button>
+    <button id="grid-pdf-preview-button" class="icon-text-button export-filter-button" type="button" {% if not is_order_admin %}hidden{% endif %}><i data-lucide="scan-eye"></i><span>Filter & Export</span></button>
+    <div class="menu-wrap destination-export-wrap" {% if not is_order_admin %}hidden{% endif %}><button class="icon-text-button export-destination joe-export" data-export-menu="joe-export-menu"><i data-lucide="download"></i><span>Export JOE</span></button><div id="joe-export-menu" class="dropdown-menu export-choice-menu" hidden><strong>Export JOE</strong><a href="/api/orders/{{ order_list.id }}/export/joe.pdf"><i data-lucide="file-text"></i><span>Export PDF</span></a><a href="/api/orders/{{ order_list.id }}/export/joe.xlsx"><i data-lucide="sheet"></i><span>Export Excel</span></a></div></div>
+    <div class="menu-wrap destination-export-wrap" {% if not is_order_admin %}hidden{% endif %}><button class="icon-text-button export-destination bt-export" data-export-menu="bt-export-menu"><i data-lucide="download"></i><span>Export BT</span></button><div id="bt-export-menu" class="dropdown-menu export-choice-menu" hidden><strong>Export BT</strong><a href="/api/orders/{{ order_list.id }}/export/bt.pdf"><i data-lucide="file-text"></i><span>Export PDF</span></a><a href="/api/orders/{{ order_list.id }}/export/bt.xlsx"><i data-lucide="sheet"></i><span>Export Excel</span></a></div></div>
+    <div class="menu-wrap destination-export-wrap" {% if not is_order_admin %}hidden{% endif %}><button class="icon-text-button export-destination sqw-export" data-export-menu="sqw-export-menu"><i data-lucide="download"></i><span>Export SQW</span></button><div id="sqw-export-menu" class="dropdown-menu export-choice-menu" hidden><strong>Export SQW</strong><a href="/api/orders/{{ order_list.id }}/export/sqw.pdf"><i data-lucide="file-text"></i><span>Export PDF</span></a><a href="/api/orders/{{ order_list.id }}/export/sqw.xlsx"><i data-lucide="sheet"></i><span>Export Excel</span></a></div></div>
+    <div class="menu-wrap destination-export-wrap" {% if not is_order_admin %}hidden{% endif %}><button class="icon-text-button export-destination transfer-export" data-export-menu="transfer-export-menu"><i data-lucide="download"></i><span>Export Transfer</span></button><div id="transfer-export-menu" class="dropdown-menu export-choice-menu" hidden><strong>Export Transfer</strong><a href="/api/orders/{{ order_list.id }}/export/transfers.pdf"><i data-lucide="file-text"></i><span>Export PDF</span></a><a href="/api/orders/{{ order_list.id }}/export/transfers.xlsx"><i data-lucide="sheet"></i><span>Export Excel</span></a></div></div>
+    {% if is_order_admin and order_list.status == 'draft' %}<button id="finalize-order-button" class="primary-button"><i data-lucide="lock"></i>Finalize list</button>{% endif %}
+    {% if is_order_admin %}<button id="delete-order-button" class="icon-text-button danger-outline"><i data-lucide="trash-2"></i>Delete list</button>{% endif %}
+  </div>
+</section>
+
+<section class="capture-band" {% if not can_edit_order %}hidden{% endif %}>
+  <div class="product-search-wrap">
+    <i data-lucide="search"></i><input id="product-search" autocomplete="off" placeholder="Scan barcode or search name / product number" aria-label="Find product" title="Up/Down moves through results; Shift+Up/Down checks products"><button id="order-search-filter-button" class="icon-button search-filter-button" title="Filter search"><i data-lucide="list-filter"></i></button><button id="camera-button" class="icon-button" title="Scan with camera"><i data-lucide="scan-barcode"></i></button><div id="order-search-filter-panel" class="search-filter-panel" hidden></div>
+    <div id="search-results" class="search-results" hidden></div>
+  </div>
+  <div class="sheet-stats"><span><strong id="item-count">0</strong> products</span><span>Saved automatically</span></div>
+</section>
+
+<section id="batch-selection" class="batch-selection" hidden>
+  <div><strong><span id="batch-selection-count">0</span> selected</strong><span id="batch-selection-names"></span></div>
+  <div class="batch-selection-actions"><button id="clear-batch-selection" type="button" class="secondary-button">Clear</button><button id="add-batch-selection" type="button" class="primary-button"><i data-lucide="list-plus"></i><span>Add selected</span></button></div>
+</section>
+
+<section id="selected-product" class="selected-product" hidden>
+  <div><p class="eyebrow">Selected product</p><h2 id="selected-name"></h2><p id="selected-number"></p></div>
+  <div class="metric-box"><span>System stock</span><strong id="selected-stock">--</strong></div>
+  <label class="quantity-box">On shelf<input id="selected-on-shelf" type="number" min="0" step="1" value="0"></label>
+  <div class="selected-actions"><button id="cancel-product" class="secondary-button">Cancel</button><button id="add-product" class="primary-button">Add to list</button></div>
+</section>
+
+<div id="column-panel" class="column-panel" hidden><div class="column-panel-head"><strong>Visible columns</strong><button class="icon-button" title="Close"><i data-lucide="x"></i></button></div><div id="column-options"></div></div>
+<div id="freeze-panel" class="column-panel freeze-panel" hidden><div class="column-panel-head"><strong>Frozen columns</strong><button class="icon-button" title="Close"><i data-lucide="x"></i></button></div><div id="freeze-options"></div></div>
+<section class="grid-shell"><div id="order-grid" class="ag-theme-quartz"></div></section>
+
+<dialog id="list-note-dialog" class="modal list-note-modal"><div class="modal-header"><div><h2>Note for this list</h2><p>Items not in the system or instructions that apply to the entire order.</p></div><button id="list-note-close" class="icon-button" title="Close"><i data-lucide="x"></i></button></div><textarea id="order-list-notes" rows="7" maxlength="5000" {% if not can_edit_order %}readonly{% endif %} placeholder="Example: Also order the new display item—it is not in our system yet."></textarea><div class="note-modal-footer"><small id="order-notes-status">{% if can_edit_order %}Saved automatically{% else %}Finalized · read only{% endif %}</small><button id="list-note-done" class="primary-button">Done</button></div></dialog>
+
+<dialog id="camera-dialog" class="modal camera-modal"><div class="modal-header"><div><h2>Scan barcode</h2><p>Center the barcode in the camera view.</p></div><button id="camera-close" class="icon-button"><i data-lucide="x"></i></button></div><div class="camera-video-frame"><video id="camera-video" autoplay playsinline></video></div><label class="camera-zoom-control"><span><i data-lucide="zoom-in"></i> Zoom</span><input id="camera-zoom" type="range" min="1" max="3" step="0.1" value="1"><output id="camera-zoom-value">1×</output></label><p id="camera-status">Starting camera...</p><div class="camera-photo-fallback"><span>Camera preview unavailable?</span><label class="secondary-button"><i data-lucide="camera"></i><span>Take photo or choose image</span><input id="barcode-photo" type="file" accept="image/*" capture="environment"></label><div id="camera-file-reader" hidden></div></div></dialog>
+<dialog id="transfer-dialog" class="modal transfer-modal">
+  <div class="modal-header"><div><h2>Edit transfers</h2><p id="transfer-product-name"></p></div><button id="transfer-close" class="icon-button" title="Close"><i data-lucide="x"></i></button></div>
+  <div id="transfer-editor-rows" class="transfer-editor-rows"></div>
+  <button id="transfer-add-row" type="button" class="secondary-button"><i data-lucide="plus"></i><span>Add store</span></button>
+  <div class="modal-actions"><button id="transfer-cancel" type="button" class="secondary-button">Cancel</button><button id="transfer-save" type="button" class="primary-button">Save transfers</button></div>
+</dialog>
+<dialog id="grid-pdf-dialog" class="modal grid-pdf-modal">
+  <div class="grid-pdf-header">
+    <div><h2>Current grid export</h2><p>Previewing the visible columns and filtered, sorted rows.</p></div>
+    <button id="grid-pdf-close" class="icon-button" type="button" title="Close"><i data-lucide="x"></i></button>
+  </div>
+  <div class="grid-pdf-toolbar">
+    <label class="grid-export-title"><span>List title</span><input id="grid-export-title" maxlength="160" autocomplete="off"></label>
+    <fieldset><legend>Page orientation</legend><label><input type="radio" name="grid-pdf-orientation" value="portrait"><span>Portrait</span></label><label><input type="radio" name="grid-pdf-orientation" value="landscape" checked><span>Landscape</span></label></fieldset>
+    <span id="grid-pdf-summary"></span>
+    <div class="grid-export-downloads"><button id="grid-xlsx-download" class="secondary-button" type="button"><i data-lucide="sheet"></i><span>Download Excel</span></button><button id="grid-pdf-download" class="primary-button" type="button" disabled><i data-lucide="download"></i><span>Download PDF</span></button></div>
+  </div>
+  <div class="grid-pdf-preview"><div id="grid-pdf-loading">Preparing preview…</div><iframe id="grid-pdf-frame" title="Current grid PDF preview"></iframe></div>
+</dialog>
+<script>window.ORDER_LIST_ID={{ order_list.id }};window.ORDER_PERMISSIONS={isAdmin:{{ is_order_admin|yesno:"true,false" }},canEdit:{{ can_edit_order|yesno:"true,false" }},isFinalized:'{{ order_list.status }}'==='finalized'};</script>
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="{% static 'orders/product_search_filters.js' %}?v=20260712c"></script><script src="{% static 'orders/order_grid.js' %}?v=20260713h"></script>
+{% endblock %}

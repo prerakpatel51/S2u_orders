@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Operations | Store Orders{% endblock %}
+{% block content %}
+<section class="page-heading ops-heading"><div><p class="eyebrow">System status</p><h1>Operations</h1><p id="ops-updated">Loading current state...</p></div><button id="refresh-ops" class="icon-button" title="Refresh"><i data-lucide="refresh-cw"></i></button></section>
+
+<section id="ops-counts" class="ops-counts" aria-label="Synchronized data"></section>
+
+<section class="ops-band">
+  <div class="ops-section-head"><div><p class="eyebrow">Protected operation</p><h2>Full KORONA reconciliation</h2></div><div id="full-sync-actions"></div></div>
+  <div id="full-sync-status" class="full-sync-status"></div>
+</section>
+
+<section><div class="ops-section-head"><h2 class="section-heading">Synchronization services</h2></div><div id="service-list" class="service-list"></div></section>
+
+<section class="ops-two-column">
+  <div><h2 class="section-heading">Recent runs</h2><div class="table-scroll"><table class="data-table"><thead><tr><th>Service</th><th>Status</th><th>Started</th><th>Duration</th><th>Seen</th><th>Changes</th></tr></thead><tbody id="run-list"></tbody></table></div></div>
+  <div><h2 class="section-heading">System logs</h2><div class="table-scroll"><table class="data-table"><thead><tr><th>Level</th><th>Source</th><th>Message</th><th>Time</th></tr></thead><tbody id="log-list"></tbody></table></div></div>
+</section>
+
+<section><h2 class="section-heading">KORONA request latency</h2><div class="table-scroll"><table class="data-table"><thead><tr><th>Endpoint</th><th>Status</th><th>Latency</th><th>Time</th></tr></thead><tbody id="latency-list"></tbody></table></div></section>
+
+<dialog id="full-sync-dialog" class="modal"><form id="full-sync-form" method="dialog"><div class="modal-header"><div><h2>Full KORONA reconciliation</h2><p>Order lists, users, shelf quantities, distributor quantities and transfers are preserved.</p></div><button id="full-sync-close" type="button" class="icon-button" title="Close"><i data-lucide="x"></i></button></div><div class="destructive-summary"><strong>Rebuilt in order</strong><span>Stores → Products → Stocks → Receipts → 30-day totals</span></div><label>Enter FULL RESYNC<input id="full-sync-confirmation" autocomplete="off" required></label><div class="modal-actions"><button id="full-sync-cancel" type="button" class="secondary-button">Cancel</button><button type="submit" class="primary-button danger-button"><i data-lucide="database-zap"></i><span>Start reconciliation</span></button></div></form></dialog>
+{% endblock %}
+{% block scripts %}<script src="{% static 'orders/operations.js' %}"></script>{% endblock %}

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}All-store Inventory | Store Orders{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-grid.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-theme-quartz.css">
+{% endblock %}
+{% block content %}
+<section class="page-heading inventory-heading">
+  <div class="sheet-title"><a href="{% url 'home' %}" class="back-link"><i data-lucide="arrow-left"></i></a><div><p class="eyebrow">Inventory workspace</p><h1>All stores</h1><p>Compare current stock and monthly need across every store.</p></div></div>
+  <button id="clear-inventory" class="secondary-button"><i data-lucide="trash-2"></i>Clear products</button>
+</section>
+
+<section class="inventory-search-band">
+  <div class="product-search-wrap inventory-search-wrap">
+    <i data-lucide="search"></i><input id="inventory-search" autocomplete="off" placeholder="Search product name, number, or scan barcode" aria-label="Find products"><button id="inventory-search-filter-button" class="icon-button search-filter-button" title="Filter search"><i data-lucide="list-filter"></i></button><label class="icon-button inventory-camera-button" title="Take a barcode photo"><i data-lucide="scan-barcode"></i><input id="inventory-barcode-photo" type="file" accept="image/*" capture="environment"></label><div id="inventory-file-reader" hidden></div><div id="inventory-search-filter-panel" class="search-filter-panel" hidden></div>
+    <div id="inventory-results" class="search-results" hidden></div>
+  </div>
+  <select id="inventory-search-field" class="inventory-filter" aria-label="Search field"><option value="all">All fields</option><option value="name">Product name</option><option value="number">Product number</option></select>
+  <label class="inventory-hide-added"><input id="inventory-hide-added" type="checkbox"><span>Hide added</span></label>
+  <button id="add-inventory-selection" class="primary-button" disabled><i data-lucide="list-plus"></i><span>Add selected</span><strong id="inventory-selection-count">0</strong></button>
+</section>
+<p class="inventory-help">Up/Down moves · Shift+Up/Down checks products · Enter adds · Shift+Enter checks · Shift+click selects a range · Tap checkboxes on touch screens</p>
+<section class="inventory-grid-shell"><div id="inventory-grid" class="ag-theme-quartz"></div><div id="inventory-empty" class="inventory-empty"><i data-lucide="package-search"></i><h2>Search and add products</h2><p>Each store will appear as a column with stock and monthly need.</p></div></section>
+{% endblock %}
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="{% static 'orders/product_search_filters.js' %}?v=20260712c"></script><script src="{% static 'orders/inventory.js' %}?v=20260712i"></script>
+{% endblock %}

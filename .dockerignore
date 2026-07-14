@@ -1,0 +1,12 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+node_modules
+staticfiles
+.DS_Store
+celerybeat-schedule*
+db.sqlite3
+tmp
+output
