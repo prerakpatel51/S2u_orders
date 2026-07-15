@@ -2,6 +2,5 @@
 builder = "DOCKERFILE"
 
 [deploy]
-preDeployCommand = "python manage.py migrate --noinput && python manage.py collectstatic --noinput"
-startCommand = "sh -c 'gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --worker-class gthread --threads 4 --timeout 60 --keep-alive 5'"
+startCommand = "/app/start.sh"
 restartPolicyType = "ON_FAILURE"
