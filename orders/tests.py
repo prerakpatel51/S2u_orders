@@ -2,7 +2,7 @@ import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from io import BytesIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -44,9 +44,12 @@ from .services import (
 from .serializers import supplier_short_name
 from .tasks import (
     INTERRUPTED_MESSAGE,
+    MONTHLY_CONFLICT_REASON,
     reconcile_stocks_task,
+    reconcile_monthly_totals_task,
     recover_interrupted_runs,
     resolve_worker_interruptions,
+    sync_receipts_task,
 )
 
 
@@ -262,6 +265,68 @@ class StoreStockSyncTests(TestCase):
         self.assertEqual(matching.context["resolved_by"], "monthly_reconciliation")
         self.assertEqual(matching.context["resolved_at"], resolved_at.isoformat())
         self.assertNotIn("resolved_at", unrelated.context)
+
+    def test_monthly_reconciliation_waits_then_receipt_task_dispatches_it(self):
+        receipt_control = ServiceControl.objects.create(
+            service_name="receipts",
+            status=ServiceControl.Status.RUNNING,
+            locked_until=timezone.now() + timedelta(minutes=5),
+        )
+        monthly_control = ServiceControl.objects.create(
+            service_name="monthly_reconciliation",
+            status=ServiceControl.Status.QUEUED,
+        )
+        monthly_work = Mock(return_value={"seen": 1, "created": 1, "updated": 0})
+
+        with patch.dict(
+            "orders.tasks.SERVICES",
+            {"monthly_reconciliation": (monthly_work, 86400)},
+        ):
+            waiting = reconcile_monthly_totals_task(force=True)
+
+        monthly_control.refresh_from_db()
+        monthly_work.assert_not_called()
+        self.assertEqual(waiting["reason"], MONTHLY_CONFLICT_REASON)
+        self.assertTrue(waiting["queued"])
+        self.assertEqual(monthly_control.status, ServiceControl.Status.QUEUED)
+
+        receipt_control.status = ServiceControl.Status.IDLE
+        receipt_control.locked_until = None
+        receipt_control.save(update_fields=["status", "locked_until", "updated_at"])
+        receipt_work = Mock(return_value={"seen": 1, "created": 0, "updated": 0})
+        with patch("orders.tasks.reconcile_monthly_totals_task.delay") as delay, patch.dict(
+            "orders.tasks.SERVICES", {"receipts": (receipt_work, 120)}
+        ):
+            receipt_result = sync_receipts_task(force=True)
+
+        receipt_work.assert_not_called()
+        self.assertEqual(receipt_result["reason"], MONTHLY_CONFLICT_REASON)
+        delay.assert_called_once_with(force=True)
+
+        with patch.dict(
+            "orders.tasks.SERVICES",
+            {"monthly_reconciliation": (monthly_work, 86400)},
+        ):
+            completed = reconcile_monthly_totals_task(force=True)
+
+        monthly_control.refresh_from_db()
+        monthly_work.assert_called_once_with()
+        self.assertEqual(completed["seen"], 1)
+        self.assertEqual(monthly_control.status, ServiceControl.Status.IDLE)
+
+    def test_skipped_monthly_job_clears_a_stale_queued_status(self):
+        control = ServiceControl.objects.create(
+            service_name="monthly_reconciliation",
+            status=ServiceControl.Status.QUEUED,
+            locked_until=timezone.now() + timedelta(minutes=5),
+        )
+
+        result = reconcile_monthly_totals_task(force=True)
+
+        control.refresh_from_db()
+        self.assertEqual(result["reason"], "already running")
+        self.assertEqual(control.status, ServiceControl.Status.IDLE)
+        self.assertIsNone(control.locked_until)
 
 
 class ReceiptSyncTests(TestCase):

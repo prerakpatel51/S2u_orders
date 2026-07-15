@@ -4,6 +4,7 @@ from datetime import timedelta
 from celery import shared_task
 from celery.signals import worker_ready
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import ServiceControl, SyncRun, SystemLog
@@ -21,6 +22,7 @@ SERVICES = {
 }
 STOCK_SERVICES = {"stocks", "stock_reconciliation"}
 MONTHLY_SERVICES = {"receipts", "monthly_reconciliation"}
+MONTHLY_CONFLICT_REASON = "another monthly calculation is running"
 SERVICE_LOCK_TIMEOUTS = {
     "stock_reconciliation": timedelta(hours=2),
     "monthly_reconciliation": timedelta(hours=4),
@@ -108,10 +110,11 @@ def run_controlled(service_name, force=False, ignore_interval=False):
         return {"skipped": True, "reason": "another stock synchronization is running"}
     if service_name in MONTHLY_SERVICES and ServiceControl.objects.filter(
         service_name__in=MONTHLY_SERVICES,
-        locked_until__gt=now,
-    ).exclude(pk=control.pk).exists():
+    ).exclude(pk=control.pk).filter(
+        Q(locked_until__gt=now) | Q(status=ServiceControl.Status.QUEUED)
+    ).exists():
         SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
-        return {"skipped": True, "reason": "another monthly calculation is running"}
+        return {"skipped": True, "reason": MONTHLY_CONFLICT_REASON}
     if control.locked_until and control.locked_until > now:
         return {"skipped": True, "reason": "already running"}
     control.status = ServiceControl.Status.RUNNING
@@ -179,9 +182,56 @@ def reconcile_stocks_task(force=False):
 
 @shared_task(name="orders.tasks.sync_receipts_task")
 def sync_receipts_task(force=False):
-    return run_controlled("receipts", force)
+    try:
+        return run_controlled("receipts", force)
+    finally:
+        dispatch_waiting_monthly_reconciliation()
 
 
 @shared_task(name="orders.tasks.reconcile_monthly_totals_task")
 def reconcile_monthly_totals_task(force=False):
-    return run_controlled("monthly_reconciliation", force, ignore_interval=True)
+    result = run_controlled("monthly_reconciliation", force, ignore_interval=True)
+    control, _ = ServiceControl.objects.get_or_create(
+        service_name="monthly_reconciliation",
+        defaults={"interval_seconds": SERVICES["monthly_reconciliation"][1]},
+    )
+    if result.get("reason") == MONTHLY_CONFLICT_REASON:
+        control.status = ServiceControl.Status.QUEUED
+        control.last_error = ""
+        control.save(update_fields=["status", "last_error", "updated_at"])
+        return {**result, "queued": True}
+    if result.get("skipped") and control.status == ServiceControl.Status.QUEUED:
+        control.status = (
+            ServiceControl.Status.IDLE if control.enabled else ServiceControl.Status.DISABLED
+        )
+        control.locked_until = None
+        control.last_error = ""
+        control.save(update_fields=["status", "locked_until", "last_error", "updated_at"])
+    return result
+
+
+def dispatch_waiting_monthly_reconciliation():
+    """Hand a queued reconciliation the worker slot released by receipt sync."""
+    control = ServiceControl.objects.filter(
+        service_name="monthly_reconciliation",
+        status=ServiceControl.Status.QUEUED,
+    ).first()
+    if control is None:
+        return False
+    if ServiceControl.objects.filter(
+        service_name="receipts", locked_until__gt=timezone.now()
+    ).exists():
+        return False
+    try:
+        reconcile_monthly_totals_task.delay(force=True)
+    except Exception as exc:
+        control.status = ServiceControl.Status.ERROR
+        control.last_error = f"Could not retry queued reconciliation: {exc}"[:4000]
+        control.save(update_fields=["status", "last_error", "updated_at"])
+        SystemLog.objects.create(
+            level="ERROR",
+            source="sync.monthly_reconciliation",
+            message=control.last_error,
+        )
+        return False
+    return True
