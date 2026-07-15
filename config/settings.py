@@ -134,6 +134,8 @@ CELERY_TIMEZONE = TIME_ZONE
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 KORONA_STOCK_RECONCILE_HOUR = min(23, max(0, int(os.getenv("KORONA_STOCK_RECONCILE_HOUR", "3"))))
 KORONA_STOCK_RECONCILE_MINUTE = min(59, max(0, int(os.getenv("KORONA_STOCK_RECONCILE_MINUTE", "15"))))
+KORONA_MONTHLY_RECONCILE_HOUR = min(23, max(0, int(os.getenv("KORONA_MONTHLY_RECONCILE_HOUR", "4"))))
+KORONA_MONTHLY_RECONCILE_MINUTE = min(59, max(0, int(os.getenv("KORONA_MONTHLY_RECONCILE_MINUTE", "15"))))
 CELERY_BEAT_SCHEDULE = {
     "sync-korona-receipts": {
         "task": "orders.tasks.sync_receipts_task",
@@ -156,6 +158,13 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(
             hour=KORONA_STOCK_RECONCILE_HOUR,
             minute=KORONA_STOCK_RECONCILE_MINUTE,
+        ),
+    },
+    "reconcile-monthly-totals-nightly": {
+        "task": "orders.tasks.reconcile_monthly_totals_task",
+        "schedule": crontab(
+            hour=KORONA_MONTHLY_RECONCILE_HOUR,
+            minute=KORONA_MONTHLY_RECONCILE_MINUTE,
         ),
     },
 }

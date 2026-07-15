@@ -1,31 +1,38 @@
 {% extends "base.html" %}
 {% load static %}
-{% block title %}Operations | Store Orders{% endblock %}
+{% block title %}Operations | S2U Orders{% endblock %}
 {% block content %}
 <section class="page-heading ops-heading"><div><p class="eyebrow">System status</p><h1>Operations</h1><p id="ops-updated">Loading current state...</p></div><button id="refresh-ops" class="icon-button" title="Refresh"><i data-lucide="refresh-cw"></i></button></section>
 
 <section id="ops-counts" class="ops-counts" aria-label="Synchronized data"></section>
+<section id="ops-overview" class="ops-overview" aria-label="Job health"></section>
+<section id="ops-attention" class="ops-attention" hidden></section>
 
 <section class="ops-stock-panel">
-  <div class="ops-section-head"><div><p class="eyebrow">Revision-based cache</p><h2>Stock synchronization health</h2><p>Incremental polling by store, backed by a nightly complete reconciliation.</p></div><span id="stock-health-badge" class="status">Loading</span></div>
+  <div class="ops-section-head"><div><p class="eyebrow">Inventory cache</p><h2>Stock synchronization health</h2><p>Store-by-store cursor health, latest changes, and nightly repair coverage.</p></div><span id="stock-health-badge" class="status">Loading</span></div>
+  <div id="stock-coverage" class="stock-coverage"></div>
   <div id="stock-sync-summary" class="stock-sync-summary"></div>
-  <div class="table-scroll stock-store-table"><table class="data-table"><thead><tr><th>Store</th><th>Status</th><th>Last successful poll</th><th>Age</th><th>Revision cursor</th><th>Stock records</th></tr></thead><tbody id="stock-store-list"></tbody></table></div>
+  <details class="stock-store-details"><summary>View every store cursor</summary><div class="table-scroll stock-store-table"><table class="data-table"><thead><tr><th>Store</th><th>Status</th><th>Last successful poll</th><th>Age</th><th>Revision cursor</th><th>Stock records</th></tr></thead><tbody id="stock-store-list"></tbody></table></div></details>
 </section>
 
-<section class="ops-band">
-  <div class="ops-section-head"><div><p class="eyebrow">Protected operation</p><h2>Full application resync</h2><p>Rebuilds stores, products, store stocks, receipts and rolling totals.</p></div><div id="full-sync-actions"></div></div>
-  <div id="full-sync-status" class="full-sync-status"></div>
+<section class="ops-jobs-section"><div class="ops-section-head"><div><p class="eyebrow">Scheduled and manual jobs</p><h2>Synchronization jobs</h2><p>Each card shows the latest result and exactly what changed.</p></div></div><div id="service-list" class="service-grid"></div></section>
+
+<section class="diagnostic-panel">
+  <div class="diagnostic-head"><div><p class="eyebrow">Audit trail</p><h2>Recent job runs</h2><p>Successful work, durations, record counts, and interrupted jobs.</p></div><div class="diagnostic-filters"><select id="run-service-filter" aria-label="Filter runs by job"><option value="">All jobs</option></select><select id="run-status-filter" aria-label="Filter runs by result"><option value="">All results</option><option value="success">Success</option><option value="error">Errors</option><option value="running">Running</option></select></div></div>
+  <div id="run-summary" class="diagnostic-summary"></div>
+  <div class="table-scroll diagnostic-table"><table class="data-table"><thead><tr><th>Job</th><th>Result</th><th>Started</th><th>Duration</th><th>Work completed / error</th></tr></thead><tbody id="run-list"></tbody></table></div>
 </section>
 
-<section><div class="ops-section-head"><h2 class="section-heading">Synchronization services</h2></div><div id="service-list" class="service-list"></div></section>
-
-<section class="ops-two-column">
-  <div><h2 class="section-heading">Recent runs</h2><div class="table-scroll"><table class="data-table"><thead><tr><th>Service</th><th>Status</th><th>Started</th><th>Duration</th><th>Seen</th><th>Changes</th></tr></thead><tbody id="run-list"></tbody></table></div></div>
-  <div><h2 class="section-heading">System logs</h2><div class="table-scroll"><table class="data-table"><thead><tr><th>Level</th><th>Source</th><th>Message</th><th>Time</th></tr></thead><tbody id="log-list"></tbody></table></div></div>
+<section class="diagnostic-panel">
+  <div class="diagnostic-head"><div><p class="eyebrow">Application events</p><h2>System logs</h2><p>Warnings, active errors, and resolved worker events.</p></div><div class="diagnostic-filters"><select id="log-level-filter" aria-label="Filter logs by level"><option value="">All levels</option><option value="unresolved">Active errors</option><option value="ERROR">All error history</option><option value="WARNING">Warnings</option><option value="INFO">Information</option></select><input id="log-search" type="search" placeholder="Search source or message" aria-label="Search logs"></div></div>
+  <div id="log-summary" class="diagnostic-summary"></div>
+  <div class="table-scroll diagnostic-table"><table class="data-table"><thead><tr><th>Level</th><th>Source</th><th>Message and context</th><th>Time</th></tr></thead><tbody id="log-list"></tbody></table></div>
 </section>
 
-<section><h2 class="section-heading">KORONA request latency</h2><div class="table-scroll"><table class="data-table"><thead><tr><th>Endpoint</th><th>Status</th><th>Latency</th><th>Time</th></tr></thead><tbody id="latency-list"></tbody></table></div></section>
-
-<dialog id="full-sync-dialog" class="modal"><form id="full-sync-form" method="dialog"><div class="modal-header"><div><h2>Full application resync</h2><p>Order lists, users, shelf quantities, distributor quantities and transfers are preserved.</p></div><button id="full-sync-close" type="button" class="icon-button" title="Close"><i data-lucide="x"></i></button></div><div class="destructive-summary"><strong>Rebuilt in order</strong><span>Stores → Products → Store stocks → Receipts → 30-day totals</span></div><label>Enter FULL RESYNC<input id="full-sync-confirmation" autocomplete="off" required></label><div class="modal-actions"><button id="full-sync-cancel" type="button" class="secondary-button">Cancel</button><button type="submit" class="primary-button danger-button"><i data-lucide="database-zap"></i><span>Start resync</span></button></div></form></dialog>
+<section class="diagnostic-panel">
+  <div class="diagnostic-head"><div><p class="eyebrow">KORONA connection</p><h2>Request latency</h2><p>24-hour endpoint reliability plus the latest individual requests.</p></div><div class="diagnostic-filters"><select id="latency-status-filter" aria-label="Filter requests"><option value="">All requests</option><option value="error">Errors only</option><option value="slow">Slow (1s+)</option></select><input id="latency-search" type="search" placeholder="Search endpoint" aria-label="Search request endpoints"></div></div>
+  <div id="api-summary" class="diagnostic-summary"></div>
+  <div class="latency-layout"><div><h3>Endpoint health · last 24 hours</h3><div class="table-scroll diagnostic-table"><table class="data-table"><thead><tr><th>Endpoint</th><th>Requests</th><th>Errors</th><th>Average</th><th>Slowest</th></tr></thead><tbody id="endpoint-health-list"></tbody></table></div></div><details><summary>Latest individual requests</summary><div class="table-scroll diagnostic-table"><table class="data-table"><thead><tr><th>Endpoint</th><th>Status</th><th>Latency</th><th>Time</th></tr></thead><tbody id="latency-list"></tbody></table></div></details></div>
+</section>
 {% endblock %}
-{% block scripts %}<script src="{% static 'orders/operations.js' %}"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'orders/operations.js' %}?v=20260715c"></script>{% endblock %}

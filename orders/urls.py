@@ -28,8 +28,6 @@ urlpatterns = [
     path("orders/<int:pk>/export-grid.xlsx", views.GridXLSXExportAPIView.as_view(), name="api-grid-xlsx-export"),
     path("operations/services/", views.ServicesAPIView.as_view(), name="api-services"),
     path("operations/services/<str:service_name>/run/", views.ServiceRunAPIView.as_view(), name="api-service-run"),
-    path("operations/full-sync/", views.FullSyncStartAPIView.as_view(), name="api-full-sync"),
-    path("operations/full-sync/<int:pk>/resume/", views.FullSyncResumeAPIView.as_view(), name="api-full-sync-resume"),
     path("users/", views.UserListAPIView.as_view(), name="api-users"),
     path("users/<int:pk>/", views.UserDetailAPIView.as_view(), name="api-user-detail"),
 ]

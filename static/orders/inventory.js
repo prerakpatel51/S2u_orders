@@ -19,6 +19,19 @@ const escapeHtml = value => { const el = document.createElement('div'); el.textC
 const formatNumber = value => Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: 3});
 const barcodeVariants = value => { const code=String(value||'').trim(); if(!/^\d{7,15}$/.test(code)) return new Set(); const stripped=code.replace(/^0+/,'')||'0', values=new Set([code,stripped,`0${code}`,`0${stripped}`]); if(code.endsWith('0')&&code.length>7){values.add(code.slice(0,-1));values.add(code.slice(0,-1).replace(/^0+/,'')||'0');} if(code.length<15)values.add(`${code}0`); return values; };
 const exactBarcodeProduct = (products, query) => { const variants=barcodeVariants(query); if(!variants.size)return null; const matches=products.filter(product=>product.codes.some(code=>variants.has(String(code).replace(/\D/g,'')))); return matches.length===1?matches[0]:null; };
+const normalizeSearchText = value => String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+function searchNameMatches(name, query) {
+  const normalizedName = normalizeSearchText(name);
+  return query.split(/\s+/).map(normalizeSearchText).filter(Boolean).every(word => {
+    const variants = [word];
+    if (/^[a-z]+$/.test(word) && word.length > 3) {
+      if (word.endsWith('ies') && word.length > 4) variants.push(`${word.slice(0, -3)}y`);
+      if (word.endsWith('es') && word.length > 4) variants.push(word.slice(0, -2));
+      if (word.endsWith('s')) variants.push(word.slice(0, -1));
+    }
+    return variants.some(variant => normalizedName.includes(variant));
+  });
+}
 
 function renderSuggestions() {
   results.innerHTML = suggestions.length ? `<p class="suggestion-result-count">${suggestions.length.toLocaleString()} matching product${suggestions.length === 1 ? '' : 's'}</p>${suggestions.map((product, index) => `<div class="suggestion-item inventory-suggestion${index === suggestionIndex ? ' active' : ''}${selected.has(product.id) ? ' batch-selected' : ''}" data-id="${product.id}" data-index="${index}"><label class="inventory-checkbox-wrap" title="Select product"><input class="inventory-checkbox" type="checkbox" aria-label="Select ${escapeHtml(product.name)}" ${selected.has(product.id) ? 'checked' : ''}></label><button type="button" class="inventory-product-action"><span class="suggestion-copy"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.number)}${product.codes.length ? ` · ${escapeHtml(product.codes[0])}` : ''}</small></span><span class="suggestion-action">${displayedProducts.has(product.id) ? 'Added' : 'Add'}</span></button></div>`).join('')}` : '<p class="empty-state compact">No matching products</p>';
@@ -65,7 +78,7 @@ function applySuggestionFilters() {
   const hideAdded = document.getElementById('inventory-hide-added').checked;
   suggestions = (searchCategoryFilter ? searchCategoryFilter.filter(rawSuggestions) : rawSuggestions).filter(product => {
     if (hideAdded && displayedProducts.has(product.id)) return false;
-    if (field === 'name') return product.name.toLowerCase().includes(query);
+    if (field === 'name') return searchNameMatches(product.name, query);
     if (field === 'number') return product.number.toLowerCase().includes(query) || product.codes.some(code => code.toLowerCase().includes(query));
     return true;
   });

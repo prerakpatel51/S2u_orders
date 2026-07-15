@@ -66,6 +66,12 @@ Stock synchronization has three layers:
 - Product selection can refresh one product immediately for the order workflow.
 - At the configured nightly time, a complete store-by-store reconciliation repairs missing or stale local rows and resets stock records no longer returned by KORONA.
 
+If KORONA changes an organizational unit so it is no longer a warehouse, the next catalog or stock poll retires its stock cursor and cached stock rows immediately. A `404 CONDITION_MISMATCH` for that transition is handled as a catalog change and does not fail synchronization for the remaining warehouses.
+
+Monthly need is the non-negative net quantity sold over the trailing 30 calendar days. Receipt revisions update affected daily totals incrementally; returns reduce sales and voids remove the prior contribution. The nightly monthly reconciliation downloads every day in the complete rolling 30-day window from KORONA, replaces each local day only after its download completes, and then recalculates every current product total once.
+
+Receipts that reference a store or product not yet present locally are retained in a deferred queue and replayed after catalog synchronization. The complete nightly monthly download removes stale receipt values and provides a second recovery path for timing races and temporary outages without double-counting sales.
+
 The store stock endpoint is paged at up to 1,000 records. Revision cursors advance only after database writes commit successfully. A cursor does not advance when a stock row references a product that has not reached the local product catalog yet, allowing the next cycle to retry it safely. HTTP 429 and temporary server failures use bounded GET-only retries with exponential backoff.
 
 Order-list stock and monthly values have saved snapshots, but the API displays newer cache values when current records are available. User-entered shelf quantities, supplier quantities, transfers, and notes are not changed by synchronization jobs.

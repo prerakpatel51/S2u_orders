@@ -7,8 +7,8 @@ from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.postgres.search import TrigramSimilarity
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, close_old_connections, connection, transaction
-from django.db.models import Case, Count, IntegerField, Max, Q, Sum, When
+from django.db import close_old_connections, connection, transaction
+from django.db.models import Avg, Count, Max, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.generic import TemplateView
@@ -30,7 +30,6 @@ from .models import (
     BulkOrderItem,
     BulkOrderList,
     BulkOrderQuantity,
-    FullSyncJob,
     OrderList,
     OrderListItem,
     Product,
@@ -53,7 +52,7 @@ from .serializers import (
     product_supplier_options,
 )
 from .services import month_start, refresh_product_stocks
-from .tasks import SERVICES
+from .tasks import SERVICES, recover_interrupted_runs
 from .utils import decimal_value, normalize_search_text
 
 
@@ -63,6 +62,13 @@ def is_admin(user):
 
 def can_edit_order(user, order_list):
     return is_admin(user) or order_list.status == OrderList.Status.DRAFT
+
+
+def available_products():
+    """Products that KORONA still lists, including rows whose active flag is false."""
+    return Product.objects.filter(
+        Q(active=True) | Q(raw_data__listed=True, raw_data__deactivated=False)
+    )
 
 
 class StaffRequiredMixin(UserPassesTestMixin):
@@ -281,7 +287,7 @@ class OrderItemCreateAPIView(APIView):
         order_list = get_object_or_404(OrderList, pk=pk)
         if not can_edit_order(request.user, order_list):
             return Response({"detail": "This finalized list is read-only."}, status=403)
-        product = get_object_or_404(Product, pk=request.data.get("product_id"), active=True)
+        product = get_object_or_404(available_products(), pk=request.data.get("product_id"))
         if request.data.get("refresh_stock", True):
             try:
                 refresh_product_stocks(product)
@@ -326,7 +332,7 @@ class OrderItemBulkCreateAPIView(APIView):
         if not product_ids or len(product_ids) > 100:
             return Response({"product_ids": "Select between 1 and 100 products."}, status=400)
 
-        products = {product.id: product for product in Product.objects.filter(id__in=product_ids, active=True)}
+        products = {product.id: product for product in available_products().filter(id__in=product_ids)}
         missing = [product_id for product_id in product_ids if product_id not in products]
         if missing:
             return Response({"product_ids": f"Unavailable products: {', '.join(map(str, missing))}."}, status=400)
@@ -408,8 +414,19 @@ class ProductSearchAPIView(APIView):
         if not query:
             return Response([])
         # Correct common catalog shorthand/typos before doing a literal search.
-        # Literal matches always win; fuzzy matching is only a no-results fallback.
+        # Search each word independently so queries such as "99 bananas" also
+        # match catalog names with words between them and every bottle-size suffix.
         normalized = normalize_search_text(query).replace("pinotnior", "pinotnoir")
+        query_words = [
+            normalize_search_text(word)
+            for word in query.split()
+            if normalize_search_text(word)
+        ]
+        if normalized == "pinotnoir":
+            query_words = [normalized]
+        if not query_words:
+            query_words = [normalized]
+        query_word_variants = [_search_word_variants(word) for word in query_words]
         barcode_variants = {normalized}
         if normalized.isdigit() and 7 <= len(normalized) <= 15:
             stripped = normalized.lstrip("0") or "0"
@@ -419,22 +436,26 @@ class ProductSearchAPIView(APIView):
                 barcode_variants.update({without_trailing, without_trailing.lstrip("0") or "0"})
             if len(normalized) < 15:
                 barcode_variants.add(f"{normalized}0")
-        products = Product.objects.filter(active=True).prefetch_related("codes")
+        products = available_products().prefetch_related("codes")
         exact = Q(number__iexact=query) | Q(codes__normalized_code__in=barcode_variants)
-        literal_query = exact | Q(normalized_name__icontains=normalized)
+        name_words = Q()
+        for variants in query_word_variants:
+            word_match = Q()
+            for variant in variants:
+                word_match |= Q(normalized_name__icontains=variant)
+            name_words &= word_match
+        literal_query = exact | name_words
         if not query.isdigit():
             literal_query |= Q(number__icontains=query)
         literal = products.filter(literal_query).distinct()
         if literal.exists():
-            products = literal.annotate(
-                exact_rank=Case(
-                    When(number__iexact=query, then=0),
-                    When(codes__normalized_code__in=barcode_variants, then=0),
-                    default=1,
-                    output_field=IntegerField(),
+            result_products = list(literal[:5000])
+            result_products.sort(
+                key=lambda product: _product_search_rank(
+                    product, normalized, query_word_variants, barcode_variants
                 )
-            ).order_by("exact_rank", "name")
-            result_products = list(products[:1000])
+            )
+            result_products = result_products[:1000]
         elif connection.vendor == "postgresql" and len(normalized) >= 3:
             result_products = list(
                 products.annotate(similarity=TrigramSimilarity("normalized_name", normalized))
@@ -480,6 +501,47 @@ class ProductSearchAPIView(APIView):
         )
 
 
+def _search_word_variants(word):
+    """Return conservative singular alternatives while retaining the typed word."""
+    variants = {word}
+    if word.isalpha() and len(word) > 3:
+        if word.endswith("ies") and len(word) > 4:
+            variants.add(f"{word[:-3]}y")
+        if word.endswith("es") and len(word) > 4:
+            variants.add(word[:-2])
+        if word.endswith("s"):
+            variants.add(word[:-1])
+    return tuple(sorted(variants, key=lambda value: (-len(value), value)))
+
+
+def _product_search_rank(product, normalized_query, query_word_variants, barcode_variants):
+    """Put exact and naturally ordered name matches ahead of loose token matches."""
+    name = product.normalized_name or normalize_search_text(product.name)
+    number = normalize_search_text(product.number)
+    codes = {code.normalized_code or normalize_search_text(code.code) for code in product.codes.all()}
+    exact_identifier = number == normalized_query or bool(codes & barcode_variants)
+    phrase_at = name.find(normalized_query)
+    word_positions = [
+        min((position for word in variants if (position := name.find(word)) >= 0), default=-1)
+        for variants in query_word_variants
+    ]
+    words_in_order = all(
+        left <= right
+        for left, right in zip(word_positions, word_positions[1:])
+    )
+    first_word_at = word_positions[0] if word_positions else len(name)
+    return (
+        0 if exact_identifier else 1,
+        0 if name == normalized_query else 1,
+        0 if phrase_at == 0 else 1,
+        0 if phrase_at >= 0 else 1,
+        0 if words_in_order else 1,
+        first_word_at if first_word_at >= 0 else len(name),
+        len(name),
+        product.name.casefold(),
+    )
+
+
 def _refresh_search_stock(product):
     close_old_connections()
     try:
@@ -493,7 +555,7 @@ def _refresh_search_stock(product):
 
 class ProductAvailabilityAPIView(APIView):
     def get(self, request, pk):
-        product = get_object_or_404(Product, pk=pk, active=True)
+        product = get_object_or_404(available_products(), pk=pk)
         order_list = get_object_or_404(OrderList.objects.select_related("store"), pk=request.query_params.get("order_id"))
         refresh_error = ""
         try:
@@ -530,7 +592,7 @@ class ProductPreferredSupplierAPIView(APIView):
     def patch(self, request, pk):
         if not is_admin(request.user):
             return Response({"detail": "Only an admin can choose a preferred supplier."}, status=403)
-        product = get_object_or_404(Product, pk=pk, active=True)
+        product = get_object_or_404(available_products(), pk=pk)
         supplier_id = str(request.data.get("supplier_id") or "")
         valid_ids = {row["id"] for row in product_supplier_options(product)}
         if supplier_id not in valid_ids:
@@ -551,7 +613,7 @@ class InventoryComparisonAPIView(APIView):
             return Response({"product_ids": "Every product ID must be an integer."}, status=400)
         if not product_ids or len(product_ids) > 100:
             return Response({"product_ids": "Select between 1 and 100 products."}, status=400)
-        products = list(Product.objects.filter(id__in=product_ids, active=True))
+        products = list(available_products().filter(id__in=product_ids))
         product_map = {product.id: product for product in products}
         products = [product_map[product_id] for product_id in product_ids if product_id in product_map]
         stores = list(Store.objects.filter(active=True).order_by("number", "name"))
@@ -629,7 +691,7 @@ class BulkOrderItemsAPIView(APIView):
         except (TypeError, ValueError): return Response({"product_ids": "Use product IDs."}, status=400)
         if not product_ids or len(product_ids) > 100: return Response({"product_ids": "Select between 1 and 100 products."}, status=400)
         existing = set(row.items.filter(product_id__in=product_ids).values_list("product_id", flat=True))
-        valid = set(Product.objects.filter(id__in=product_ids, active=True).values_list("id", flat=True))
+        valid = set(available_products().filter(id__in=product_ids).values_list("id", flat=True))
         start = (row.items.aggregate(value=Max("row_order"))["value"] or 0) + 1
         BulkOrderItem.objects.bulk_create([BulkOrderItem(bulk_order=row, product_id=product_id, row_order=start + index) for index, product_id in enumerate(product_ids) if product_id in valid and product_id not in existing])
         row.save(update_fields=["updated_at"]); return Response({"created": len(valid - existing)})
@@ -758,12 +820,23 @@ class ServicesAPIView(APIView):
     permission_classes = [IsSuperuser]
 
     def get(self, request):
+        recover_interrupted_runs(expired_only=True)
         for name, (_, interval) in SERVICES.items():
             ServiceControl.objects.get_or_create(service_name=name, defaults={"interval_seconds": interval})
         controls = list(ServiceControl.objects.filter(service_name__in=SERVICES).order_by("service_name"))
         control_by_name = {row.service_name: row for row in controls}
-        runs = SyncRun.objects.order_by("-started_at")[:40]
-        full_sync = FullSyncJob.objects.select_related("initiated_by").first()
+        runs = list(
+            SyncRun.objects.filter(job_name__in=SERVICES)
+            .exclude(status=SyncRun.Status.SKIPPED)
+            .order_by("-started_at")[:60]
+        )
+        latest_run_by_service = {
+            name: SyncRun.objects.filter(job_name=name)
+            .exclude(status=SyncRun.Status.SKIPPED)
+            .order_by("-started_at")
+            .first()
+            for name in SERVICES
+        }
         warehouse_stores = list(Store.objects.filter(active=True, is_warehouse=True).order_by("number", "name"))
         store_ids = [store.id for store in warehouse_stores]
         stock_states = {
@@ -823,9 +896,74 @@ class ServicesAPIView(APIView):
             if stock_status_counts["stale"] or stock_status_counts["missing"]
             else "healthy"
         )
+        since = now - timedelta(hours=24)
+        daily_run_totals = SyncRun.objects.filter(
+            job_name__in=SERVICES,
+            status=SyncRun.Status.SUCCESS,
+            finished_at__gte=since,
+        ).aggregate(
+            seen=Sum("records_seen"),
+        )
+        non_stock_changes = SyncRun.objects.filter(
+            job_name__in=set(SERVICES) - {"stocks", "stock_reconciliation"},
+            status=SyncRun.Status.SUCCESS,
+            finished_at__gte=since,
+        ).aggregate(created=Sum("records_created"), updated=Sum("records_updated"))
+        # Older stock jobs counted every verified row as an update. Only include
+        # stock runs produced by the change-aware importer so this dashboard does
+        # not describe a cache verification as tens of thousands of changes.
+        stock_changes = SyncRun.objects.filter(
+            job_name__in={"stocks", "stock_reconciliation"},
+            status=SyncRun.Status.SUCCESS,
+            finished_at__gte=since,
+            metrics__has_key="unchanged",
+        ).aggregate(created=Sum("records_created"), updated=Sum("records_updated"))
+        records_changed_24h = sum(
+            (totals["created"] or 0) + (totals["updated"] or 0)
+            for totals in (non_stock_changes, stock_changes)
+        )
+        service_statuses = [row.status for row in controls]
+        attention = [
+            {
+                "name": row.service_name,
+                "status": row.status,
+                "message": row.last_error or "This job needs attention.",
+                "latest_run": serialize_sync_run(latest_run_by_service.get(row.service_name)),
+            }
+            for row in controls
+            if row.status == ServiceControl.Status.ERROR
+        ]
+        api_requests_24h = ApiRequestLog.objects.filter(created_at__gte=since)
+        api_summary = api_requests_24h.aggregate(
+            requests=Count("id"),
+            errors=Count("id", filter=Q(status_code__gte=400)),
+            average_ms=Avg("latency_ms"),
+            slowest_ms=Max("latency_ms"),
+        )
+        endpoint_health = list(
+            api_requests_24h.values("method", "url_path")
+            .annotate(
+                requests=Count("id"),
+                errors=Count("id", filter=Q(status_code__gte=400)),
+                average_ms=Avg("latency_ms"),
+                slowest_ms=Max("latency_ms"),
+            )
+            .order_by("-requests", "url_path")[:20]
+        )
         return Response(
             {
                 "can_manage": True,
+                "overview": {
+                    "services_total": len(controls),
+                    "healthy": service_statuses.count(ServiceControl.Status.IDLE),
+                    "disabled": service_statuses.count(ServiceControl.Status.DISABLED),
+                    "running": sum(status in {ServiceControl.Status.QUEUED, ServiceControl.Status.RUNNING} for status in service_statuses),
+                    "errors": service_statuses.count(ServiceControl.Status.ERROR),
+                    "records_checked_24h": daily_run_totals["seen"] or 0,
+                    "records_changed_24h": records_changed_24h,
+                    "api_errors_24h": ApiRequestLog.objects.filter(created_at__gte=since, status_code__gte=400).count(),
+                    "attention": attention,
+                },
                 "counts": {
                     "active_stores": len(warehouse_stores),
                     "products": Product.objects.count(),
@@ -844,7 +982,11 @@ class ServicesAPIView(APIView):
                         "finished_at": latest_stock_run.finished_at,
                         "duration_ms": latest_stock_run.duration_ms,
                         "seen": latest_stock_run.records_seen,
-                        "changed": latest_stock_run.records_created + latest_stock_run.records_updated,
+                        "changed": latest_stock_run.records_created + latest_stock_run.records_updated
+                        if "unchanged" in (latest_stock_run.metrics or {})
+                        else None,
+                        "unchanged": (latest_stock_run.metrics or {}).get("unchanged"),
+                        "change_breakdown_available": "unchanged" in (latest_stock_run.metrics or {}),
                     }
                     if latest_stock_run
                     else None,
@@ -852,7 +994,11 @@ class ServicesAPIView(APIView):
                         "finished_at": latest_reconciliation.finished_at,
                         "duration_ms": latest_reconciliation.duration_ms,
                         "seen": latest_reconciliation.records_seen,
-                        "changed": latest_reconciliation.records_created + latest_reconciliation.records_updated,
+                        "changed": latest_reconciliation.records_created + latest_reconciliation.records_updated
+                        if "unchanged" in (latest_reconciliation.metrics or {})
+                        else None,
+                        "unchanged": (latest_reconciliation.metrics or {}).get("unchanged"),
+                        "change_breakdown_available": "unchanged" in (latest_reconciliation.metrics or {}),
                     }
                     if latest_reconciliation
                     else None,
@@ -862,7 +1008,6 @@ class ServicesAPIView(APIView):
                     ),
                     "stores": stock_stores,
                 },
-                "full_sync": serialize_full_sync(full_sync) if full_sync else None,
                 "services": [
                     {
                         "name": row.service_name,
@@ -872,59 +1017,67 @@ class ServicesAPIView(APIView):
                         "last_run_at": row.last_run_at,
                         "next_run_at": row.next_run_at,
                         "last_error": row.last_error,
-                        "fixed_schedule": row.service_name == "stock_reconciliation",
+                        "fixed_schedule": row.service_name in {"stock_reconciliation", "monthly_reconciliation"},
+                        "manual_only": False,
                         "schedule_label": (
                             f"Daily at {settings.KORONA_STOCK_RECONCILE_HOUR:02d}:"
                             f"{settings.KORONA_STOCK_RECONCILE_MINUTE:02d} "
                             f"{settings.TIME_ZONE}"
                             if row.service_name == "stock_reconciliation"
+                            else f"Daily at {settings.KORONA_MONTHLY_RECONCILE_HOUR:02d}:"
+                            f"{settings.KORONA_MONTHLY_RECONCILE_MINUTE:02d} "
+                            f"{settings.TIME_ZONE}"
+                            if row.service_name == "monthly_reconciliation"
                             else ""
                         ),
                         "description": {
                             "stocks": "Polls each store revision cursor and applies only changed stock rows.",
                             "stock_reconciliation": "Downloads every store stock record and repairs cache drift.",
                             "receipts": "Imports receipt revisions and recalculates affected rolling 30-day totals.",
+                            "monthly_reconciliation": "Downloads the complete rolling 30-day receipt window from KORONA, replaces stale daily data, then recalculates every product total once.",
                             "products": "Imports changed products, barcodes, suppliers and commodity groups.",
                             "stores": "Imports changed organizational units and warehouse settings.",
                         }.get(row.service_name, ""),
+                        "latest_run": serialize_sync_run(latest_run_by_service.get(row.service_name)),
                     }
                     for row in controls
                 ],
-                "runs": [
-                    {
-                        "id": row.id,
-                        "job_name": row.job_name,
-                        "status": row.status,
-                        "started_at": row.started_at,
-                        "duration_ms": row.duration_ms,
-                        "seen": row.records_seen,
-                        "created": row.records_created,
-                        "updated": row.records_updated,
-                        "error": row.error_message,
-                    }
-                    for row in runs
-                ],
+                "runs": [serialize_sync_run(row) for row in runs],
+                "api_health": {
+                    "requests_24h": api_summary["requests"] or 0,
+                    "errors_24h": api_summary["errors"] or 0,
+                    "average_ms": round(api_summary["average_ms"] or 0),
+                    "slowest_ms": api_summary["slowest_ms"] or 0,
+                    "slow_requests_24h": api_requests_24h.filter(latency_ms__gte=1000).count(),
+                    "endpoints": endpoint_health,
+                },
                 "api_latency": list(
                     ApiRequestLog.objects.order_by("-created_at").values(
-                        "url_path", "status_code", "latency_ms", "created_at"
-                    )[:30]
+                        "method", "url_path", "status_code", "latency_ms", "created_at"
+                    )[:60]
                 ),
                 "logs": list(
-                    SystemLog.objects.values("level", "source", "message", "created_at")[:30]
+                    SystemLog.objects.values("level", "source", "message", "context", "created_at")[:60]
                 ),
             }
         )
 
     def patch(self, request):
-        control = get_object_or_404(ServiceControl, service_name=request.data.get("service_name"))
+        service_name = request.data.get("service_name")
+        if service_name not in SERVICES:
+            return Response({"detail": "Unknown service."}, status=404)
+        control, _ = ServiceControl.objects.get_or_create(
+            service_name=service_name,
+            defaults={"interval_seconds": SERVICES[service_name][1]},
+        )
         if "enabled" in request.data:
             if not isinstance(request.data["enabled"], bool):
                 return Response({"enabled": "Use true or false."}, status=400)
             control.enabled = bool(request.data["enabled"])
             control.status = ServiceControl.Status.IDLE if control.enabled else ServiceControl.Status.DISABLED
         if "interval_seconds" in request.data:
-            if control.service_name == "stock_reconciliation":
-                return Response({"interval_seconds": "The nightly time is configured by environment."}, status=400)
+            if control.service_name in {"stock_reconciliation", "monthly_reconciliation"}:
+                return Response({"interval_seconds": "This service uses a fixed schedule."}, status=400)
             try:
                 interval_seconds = int(request.data["interval_seconds"])
             except (TypeError, ValueError):
@@ -943,97 +1096,62 @@ class ServiceRunAPIView(APIView):
     def post(self, request, service_name):
         if service_name not in SERVICES:
             return Response({"detail": "Unknown service."}, status=404)
+        control, _ = ServiceControl.objects.get_or_create(
+            service_name=service_name,
+            defaults={"interval_seconds": SERVICES[service_name][1]},
+        )
+        if control.status in {ServiceControl.Status.QUEUED, ServiceControl.Status.RUNNING}:
+            return Response({"detail": "This job is already queued or running."}, status=409)
         from .tasks import (
             reconcile_stocks_task,
             sync_products_task,
             sync_receipts_task,
+            reconcile_monthly_totals_task,
             sync_stocks_task,
             sync_stores_task,
         )
 
-        task = {
-            "stores": sync_stores_task,
-            "products": sync_products_task,
-            "stocks": sync_stocks_task,
-            "stock_reconciliation": reconcile_stocks_task,
-            "receipts": sync_receipts_task,
-        }[service_name].delay(force=True)
+        control.status = ServiceControl.Status.QUEUED
+        control.last_error = ""
+        control.save(update_fields=["status", "last_error", "updated_at"])
+        try:
+            task = {
+                "stores": sync_stores_task,
+                "products": sync_products_task,
+                "stocks": sync_stocks_task,
+                "stock_reconciliation": reconcile_stocks_task,
+                "receipts": sync_receipts_task,
+                "monthly_reconciliation": reconcile_monthly_totals_task,
+            }[service_name].delay(force=True)
+        except Exception as exc:
+            control.status = ServiceControl.Status.ERROR
+            control.last_error = f"Could not queue job: {exc}"[:4000]
+            control.save(update_fields=["status", "last_error", "updated_at"])
+            return Response({"detail": control.last_error}, status=503)
         return Response({"queued": True, "task_id": task.id}, status=202)
 
 
-def serialize_full_sync(job):
-    return {
-        "id": job.id,
-        "status": job.status,
-        "stage": job.stage,
-        "processed": job.processed,
-        "total": job.total,
-        "current_batch": job.current_batch,
-        "total_batches": job.total_batches,
-        "stage_progress": job.stage_progress,
-        "started_at": job.started_at,
-        "finished_at": job.finished_at,
-        "heartbeat_at": job.heartbeat_at,
-        "error": job.error_message,
-        "initiated_by": job.initiated_by.get_username(),
+def serialize_sync_run(row):
+    if row is None:
+        return None
+    metrics = row.metrics or {
+        "seen": row.records_seen,
+        "created": row.records_created,
+        "updated": row.records_updated,
     }
-
-
-class FullSyncStartAPIView(APIView):
-    permission_classes = [IsSuperuser]
-
-    def post(self, request):
-        if request.data.get("confirmation") != "FULL RESYNC":
-            return Response({"detail": "Enter FULL RESYNC to confirm."}, status=400)
-        try:
-            with transaction.atomic():
-                if FullSyncJob.objects.select_for_update().filter(active_lock="full-sync").exists():
-                    return Response({"detail": "A full reconciliation already exists. Resume it if it failed."}, status=409)
-                job = FullSyncJob.objects.create(
-                    initiated_by=request.user,
-                    active_lock="full-sync",
-                )
-        except IntegrityError:
-            return Response({"detail": "A full reconciliation is already active."}, status=409)
-
-        from .tasks import full_resync_step_task
-
-        try:
-            task = full_resync_step_task.delay(job.id, job.step_number)
-        except Exception as exc:
-            job.status = FullSyncJob.Status.ERROR
-            job.error_message = f"Could not queue reconciliation: {exc}"[:4000]
-            job.save(update_fields=["status", "error_message", "updated_at"])
-            return Response({"detail": job.error_message}, status=503)
-        job.celery_task_id = task.id
-        job.save(update_fields=["celery_task_id", "updated_at"])
-        return Response(serialize_full_sync(job), status=202)
-
-
-class FullSyncResumeAPIView(APIView):
-    permission_classes = [IsSuperuser]
-
-    def post(self, request, pk):
-        with transaction.atomic():
-            job = get_object_or_404(FullSyncJob.objects.select_for_update(), pk=pk)
-            if job.active_lock != "full-sync" or job.status != FullSyncJob.Status.ERROR:
-                return Response({"detail": "Only a failed reconciliation can be resumed."}, status=409)
-            job.status = FullSyncJob.Status.QUEUED
-            job.error_message = ""
-            job.save(update_fields=["status", "error_message", "updated_at"])
-
-        from .tasks import full_resync_step_task
-
-        try:
-            task = full_resync_step_task.delay(job.id, job.step_number)
-        except Exception as exc:
-            job.status = FullSyncJob.Status.ERROR
-            job.error_message = f"Could not queue reconciliation: {exc}"[:4000]
-            job.save(update_fields=["status", "error_message", "updated_at"])
-            return Response({"detail": job.error_message}, status=503)
-        job.celery_task_id = task.id
-        job.save(update_fields=["celery_task_id", "updated_at"])
-        return Response(serialize_full_sync(job), status=202)
+    return {
+        "id": row.id,
+        "job_name": row.job_name,
+        "status": row.status,
+        "started_at": row.started_at,
+        "finished_at": row.finished_at,
+        "duration_ms": row.duration_ms,
+        "seen": row.records_seen,
+        "created": row.records_created,
+        "updated": row.records_updated,
+        "metrics": metrics,
+        "error": row.error_message,
+    }
 
 
 def serialize_user(user):

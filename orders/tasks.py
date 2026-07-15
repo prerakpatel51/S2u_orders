@@ -2,13 +2,12 @@ import logging
 from datetime import timedelta
 
 from celery import shared_task
+from celery.signals import worker_ready
 from django.conf import settings
-from django.db import transaction
 from django.utils import timezone
 
-from .full_sync import run_full_sync_step
-from .models import FullSyncJob, ServiceControl, SyncRun, SystemLog
-from .services import reconcile_stocks, sync_products, sync_receipts, sync_stocks, sync_stores
+from .models import ServiceControl, SyncRun, SystemLog
+from .services import reconcile_monthly_needs, reconcile_stocks, sync_products, sync_receipts, sync_stocks, sync_stores
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +17,73 @@ SERVICES = {
     "stocks": (sync_stocks, settings.KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS),
     "stock_reconciliation": (reconcile_stocks, settings.KORONA_STOCK_RECONCILE_INTERVAL_SECONDS),
     "receipts": (sync_receipts, 120),
+    "monthly_reconciliation": (reconcile_monthly_needs, 86400),
 }
 STOCK_SERVICES = {"stocks", "stock_reconciliation"}
+MONTHLY_SERVICES = {"receipts", "monthly_reconciliation"}
+SERVICE_LOCK_TIMEOUTS = {
+    "stock_reconciliation": timedelta(hours=2),
+    "monthly_reconciliation": timedelta(hours=4),
+}
+INTERRUPTED_MESSAGE = "Worker stopped before this job completed. Run it again when ready."
+
+
+def resolve_worker_interruptions(service_name, resolved_at):
+    """Mark restart errors historical after the affected service succeeds."""
+    resolved = []
+    for row in SystemLog.objects.filter(source="sync.worker", message=INTERRUPTED_MESSAGE):
+        context = dict(row.context or {})
+        if service_name not in context.get("services", []) or context.get("resolved_at"):
+            continue
+        context["resolved_at"] = resolved_at.isoformat()
+        context["resolved_by"] = service_name
+        row.context = context
+        resolved.append(row)
+    if resolved:
+        SystemLog.objects.bulk_update(resolved, ["context"])
+    return len(resolved)
+
+
+def recover_interrupted_runs(*, expired_only=True):
+    """Turn abandoned database locks into visible failed runs."""
+    now = timezone.now()
+    controls = ServiceControl.objects.filter(status=ServiceControl.Status.RUNNING)
+    if expired_only:
+        controls = controls.filter(locked_until__lte=now)
+    names = list(controls.values_list("service_name", flat=True))
+    if not names:
+        return 0
+    interrupted_runs = list(
+        SyncRun.objects.filter(job_name__in=names, status=SyncRun.Status.RUNNING)
+    )
+    for run in interrupted_runs:
+        run.status = SyncRun.Status.ERROR
+        run.finished_at = now
+        run.duration_ms = max(0, int((now - run.started_at).total_seconds() * 1000))
+        run.error_message = INTERRUPTED_MESSAGE
+        run.updated_at = now
+    SyncRun.objects.bulk_update(
+        interrupted_runs,
+        ["status", "finished_at", "duration_ms", "error_message", "updated_at"],
+    )
+    controls.update(
+        status=ServiceControl.Status.ERROR,
+        locked_until=None,
+        last_error=INTERRUPTED_MESSAGE,
+    )
+    SystemLog.objects.create(
+        level="ERROR",
+        source="sync.worker",
+        message=INTERRUPTED_MESSAGE,
+        context={"services": names},
+    )
+    return len(names)
+
+
+@worker_ready.connect
+def recover_runs_after_worker_restart(**_kwargs):
+    # A task from the previous worker process cannot still be executing here.
+    recover_interrupted_runs(expired_only=False)
 
 
 def run_controlled(service_name, force=False, ignore_interval=False):
@@ -28,9 +92,7 @@ def run_controlled(service_name, force=False, ignore_interval=False):
         service_name=service_name, defaults={"interval_seconds": default_interval}
     )
     now = timezone.now()
-    if FullSyncJob.objects.filter(active_lock="full-sync").exists():
-        SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
-        return {"skipped": True, "reason": "full reconciliation active"}
+    recover_interrupted_runs(expired_only=True)
     if not force and not control.enabled:
         control.status = ServiceControl.Status.DISABLED
         control.save(update_fields=["status", "updated_at"])
@@ -44,10 +106,16 @@ def run_controlled(service_name, force=False, ignore_interval=False):
     ).exclude(pk=control.pk).exists():
         SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
         return {"skipped": True, "reason": "another stock synchronization is running"}
+    if service_name in MONTHLY_SERVICES and ServiceControl.objects.filter(
+        service_name__in=MONTHLY_SERVICES,
+        locked_until__gt=now,
+    ).exclude(pk=control.pk).exists():
+        SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
+        return {"skipped": True, "reason": "another monthly calculation is running"}
     if control.locked_until and control.locked_until > now:
         return {"skipped": True, "reason": "already running"}
     control.status = ServiceControl.Status.RUNNING
-    control.locked_until = now + timedelta(minutes=15)
+    control.locked_until = now + SERVICE_LOCK_TIMEOUTS.get(service_name, timedelta(minutes=15))
     control.last_error = ""
     control.save(update_fields=["status", "locked_until", "last_error", "updated_at"])
     run = SyncRun.objects.create(job_name=service_name)
@@ -61,12 +129,14 @@ def run_controlled(service_name, force=False, ignore_interval=False):
         run.records_seen = counts.get("seen", 0)
         run.records_created = counts.get("created", 0)
         run.records_updated = counts.get("updated", 0)
+        run.metrics = counts
         run.save()
+        resolve_worker_interruptions(service_name, finished)
         control.status = ServiceControl.Status.IDLE if control.enabled else ServiceControl.Status.DISABLED
         control.last_run_at = finished
         control.next_run_at = (
             None
-            if service_name == "stock_reconciliation"
+            if service_name in {"stock_reconciliation", "monthly_reconciliation"}
             else finished + timedelta(seconds=control.interval_seconds)
         )
         return counts
@@ -112,53 +182,6 @@ def sync_receipts_task(force=False):
     return run_controlled("receipts", force)
 
 
-@shared_task(bind=True, name="orders.tasks.full_resync_step_task")
-def full_resync_step_task(self, job_id, expected_step):
-    with transaction.atomic():
-        job = FullSyncJob.objects.select_for_update().get(pk=job_id)
-        if (
-            job.active_lock != "full-sync"
-            or job.step_number != expected_step
-            or job.status != FullSyncJob.Status.QUEUED
-        ):
-            return {"skipped": True, "reason": "stale or duplicate step"}
-        job.status = FullSyncJob.Status.RUNNING
-        job.started_at = job.started_at or timezone.now()
-        job.heartbeat_at = timezone.now()
-        job.celery_task_id = self.request.id or ""
-        job.error_message = ""
-        job.save()
-
-    try:
-        job.refresh_from_db()
-        has_more = run_full_sync_step(job)
-    except Exception as exc:
-        logger.exception("Full KORONA reconciliation failed for job %s", job_id)
-        FullSyncJob.objects.filter(pk=job_id).update(
-            status=FullSyncJob.Status.ERROR,
-            error_message=str(exc)[:4000],
-            heartbeat_at=timezone.now(),
-        )
-        SystemLog.objects.create(
-            level="ERROR",
-            source="sync.full",
-            message=str(exc),
-            context={"job_id": job_id, "stage": job.stage},
-        )
-        raise
-
-    if has_more:
-        job.refresh_from_db()
-        try:
-            next_task = full_resync_step_task.delay(job.id, job.step_number)
-            FullSyncJob.objects.filter(pk=job.id, step_number=job.step_number).update(
-                celery_task_id=next_task.id
-            )
-        except Exception as exc:
-            FullSyncJob.objects.filter(pk=job.id).update(
-                status=FullSyncJob.Status.ERROR,
-                error_message=f"Could not queue the next batch: {exc}"[:4000],
-                heartbeat_at=timezone.now(),
-            )
-            raise
-    return {"job_id": job_id, "complete": not has_more}
+@shared_task(name="orders.tasks.reconcile_monthly_totals_task")
+def reconcile_monthly_totals_task(force=False):
+    return run_controlled("monthly_reconciliation", force, ignore_interval=True)

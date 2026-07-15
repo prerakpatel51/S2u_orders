@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% load static %}
-{% block title %}Store {{ order_list.store.number }} | Store Orders{% endblock %}
+{% block title %}Store {{ order_list.store.number }} | S2U Orders{% endblock %}
 {% block head %}
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-grid.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/styles/ag-theme-quartz.css">
@@ -75,5 +75,5 @@
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js"></script>
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-<script src="{% static 'orders/product_search_filters.js' %}?v=20260712c"></script><script src="{% static 'orders/order_grid.js' %}?v=20260713h"></script>
+<script src="{% static 'orders/product_search_filters.js' %}?v=20260714d"></script><script src="{% static 'orders/order_grid.js' %}?v=20260715a"></script>
 {% endblock %}

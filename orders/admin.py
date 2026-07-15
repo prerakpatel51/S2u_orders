@@ -2,6 +2,7 @@ from django.contrib import admin
 
 from .models import (
     ApiRequestLog,
+    DeferredReceipt,
     OrderItemTransfer,
     OrderList,
     OrderListItem,
@@ -46,6 +47,7 @@ admin.site.register(
         ProductStock,
         SalesDailySummary,
         ReceiptSaleLine,
+        DeferredReceipt,
         ProductMonthlyNeed,
         OrderListItem,
         OrderItemTransfer,

@@ -9,32 +9,44 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from openpyxl import load_workbook
 
+from .korona import KoronaError
 from .models import (
+    BulkOrderList,
+    DeferredReceipt,
     OrderItemTransfer,
-    FullSyncJob,
     OrderList,
     OrderListItem,
     Product,
     ProductCode,
     ProductStock,
+    ApiRequestLog,
     ReceiptSaleLine,
     SalesDailySummary,
     ServiceControl,
     Store,
+    SystemLog,
     SyncState,
     SyncRun,
 )
 from .services import (
     STOCK_SYNC_ENTITY,
     _apply_receipt,
+    rebuild_all_monthly_needs,
+    reconcile_monthly_needs,
     recalculate_monthly_need,
     recalculate_stale_monthly_needs,
+    replay_deferred_receipts,
     reconcile_store_stocks,
+    sync_monthly_receipt_history,
     sync_store_stocks_incremental,
 )
-from .full_sync import initialize_full_sync, run_full_sync_step
 from .serializers import supplier_short_name
-from .tasks import reconcile_stocks_task
+from .tasks import (
+    INTERRUPTED_MESSAGE,
+    reconcile_stocks_task,
+    recover_interrupted_runs,
+    resolve_worker_interruptions,
+)
 
 
 class FakeStoreStockClient:
@@ -45,6 +57,25 @@ class FakeStoreStockClient:
     def organizational_unit_product_stocks(self, store_id, revision=None, page_size=None):
         self.calls.append({"store_id": store_id, "revision": revision, "page_size": page_size})
         return iter(self.pages)
+
+
+class RetiredWarehouseClient:
+    def organizational_unit_product_stocks(self, store_id, revision=None, page_size=None):
+        raise KoronaError(
+            "organizational unit contains no warehouse",
+            status_code=404,
+            error_code="CONDITION_MISMATCH",
+        )
+
+    def organizational_unit(self, store_id):
+        return {
+            "id": str(store_id),
+            "number": "3210",
+            "name": "Main",
+            "active": True,
+            "warehouse": False,
+            "revision": 31,
+        }
 
 
 class StoreStockSyncTests(TestCase):
@@ -85,7 +116,31 @@ class StoreStockSyncTests(TestCase):
         self.assertEqual(stock.revision, 20)
         self.assertEqual(state.last_revision, 20)
         self.assertEqual(client.calls[0]["revision"], 10)
-        self.assertEqual(counts, {"seen": 1, "created": 0, "updated": 1, "deferred": 0})
+        self.assertEqual(
+            counts,
+            {"seen": 1, "created": 0, "updated": 1, "unchanged": 0, "deferred": 0},
+        )
+
+    def test_incremental_sync_does_not_report_an_unchanged_row_as_updated(self):
+        ProductStock.objects.create(
+            product=self.product,
+            store=self.store,
+            actual=7,
+            ordered=2,
+            lent=1,
+            reorder_level=3,
+            max_level=12,
+            revision=10,
+        )
+        SyncState.objects.create(entity=STOCK_SYNC_ENTITY, store=self.store, last_revision=10)
+        client = FakeStoreStockClient([([self.stock_row(revision=20)], 20)])
+
+        counts = sync_store_stocks_incremental(self.store, client)
+
+        self.assertEqual(counts["created"], 0)
+        self.assertEqual(counts["updated"], 0)
+        self.assertEqual(counts["unchanged"], 1)
+        self.assertEqual(ProductStock.objects.get(product=self.product, store=self.store).revision, 20)
 
     def test_incremental_cursor_does_not_advance_past_unknown_product(self):
         SyncState.objects.create(entity=STOCK_SYNC_ENTITY, store=self.store, last_revision=10)
@@ -128,6 +183,20 @@ class StoreStockSyncTests(TestCase):
         self.assertEqual(counts["created"], 1)
         self.assertEqual(counts["updated"], 1)
 
+    def test_incremental_sync_retires_store_that_is_no_longer_a_warehouse(self):
+        ProductStock.objects.create(product=self.product, store=self.store, actual=8, revision=30)
+        SyncState.objects.create(entity=STOCK_SYNC_ENTITY, store=self.store, last_revision=30)
+
+        counts = sync_store_stocks_incremental(self.store, RetiredWarehouseClient())
+
+        self.store.refresh_from_db()
+        self.assertTrue(self.store.active)
+        self.assertFalse(self.store.is_warehouse)
+        self.assertEqual(self.store.revision, 31)
+        self.assertFalse(ProductStock.objects.filter(store=self.store).exists())
+        self.assertFalse(SyncState.objects.filter(entity=STOCK_SYNC_ENTITY, store=self.store).exists())
+        self.assertEqual(counts, {"seen": 0, "created": 0, "updated": 0, "deferred": 0, "retired": 1})
+
     @patch("orders.tasks.reconcile_stocks", return_value={"seen": 0, "created": 0, "updated": 0})
     def test_nightly_task_ignores_interval_gate_but_keeps_fixed_schedule(self, reconcile):
         control, _ = ServiceControl.objects.get_or_create(service_name="stock_reconciliation")
@@ -145,6 +214,53 @@ class StoreStockSyncTests(TestCase):
         reconcile.assert_called_once_with()
         self.assertEqual(result["seen"], 0)
         self.assertIsNone(control.next_run_at)
+
+    def test_expired_running_job_is_reported_as_interrupted(self):
+        started = timezone.now() - timedelta(minutes=20)
+        control = ServiceControl.objects.create(
+            service_name="monthly_reconciliation",
+            status=ServiceControl.Status.RUNNING,
+            locked_until=timezone.now() - timedelta(minutes=5),
+        )
+        run = SyncRun.objects.create(
+            job_name="monthly_reconciliation",
+            status=SyncRun.Status.RUNNING,
+            started_at=started,
+        )
+
+        self.assertEqual(recover_interrupted_runs(), 1)
+
+        control.refresh_from_db()
+        run.refresh_from_db()
+        self.assertEqual(control.status, ServiceControl.Status.ERROR)
+        self.assertIsNone(control.locked_until)
+        self.assertEqual(control.last_error, INTERRUPTED_MESSAGE)
+        self.assertEqual(run.status, SyncRun.Status.ERROR)
+        self.assertEqual(run.error_message, INTERRUPTED_MESSAGE)
+        self.assertGreaterEqual(run.duration_ms, 20 * 60 * 1000)
+
+    def test_successful_retry_marks_matching_worker_interruptions_resolved(self):
+        matching = SystemLog.objects.create(
+            level="ERROR",
+            source="sync.worker",
+            message=INTERRUPTED_MESSAGE,
+            context={"services": ["monthly_reconciliation"]},
+        )
+        unrelated = SystemLog.objects.create(
+            level="ERROR",
+            source="sync.worker",
+            message=INTERRUPTED_MESSAGE,
+            context={"services": ["stock_reconciliation"]},
+        )
+        resolved_at = timezone.now()
+
+        self.assertEqual(resolve_worker_interruptions("monthly_reconciliation", resolved_at), 1)
+
+        matching.refresh_from_db()
+        unrelated.refresh_from_db()
+        self.assertEqual(matching.context["resolved_by"], "monthly_reconciliation")
+        self.assertEqual(matching.context["resolved_at"], resolved_at.isoformat())
+        self.assertNotIn("resolved_at", unrelated.context)
 
 
 class ReceiptSyncTests(TestCase):
@@ -174,14 +290,66 @@ class ReceiptSyncTests(TestCase):
         self.assertEqual(summary.receipts_count, 1)
         self.assertEqual(ReceiptSaleLine.objects.get().quantity, Decimal("5"))
 
+    def test_replaying_same_revision_is_idempotent(self):
+        affected, counts = set(), {"created": 0, "updated": 0}
+        receipt = self.receipt(4, revision=7)
+
+        _apply_receipt(receipt, affected, counts)
+        _apply_receipt(receipt, affected, counts)
+
+        summary = SalesDailySummary.objects.get(store=self.store, product=self.product)
+        self.assertEqual(summary.quantity_sold, Decimal("4"))
+        self.assertEqual(summary.receipts_count, 1)
+        self.assertEqual(ReceiptSaleLine.objects.count(), 1)
+
+    def test_unknown_product_receipt_is_replayed_after_catalog_sync(self):
+        unknown_product_id = uuid.uuid4()
+        receipt = self.receipt(6, revision=8)
+        receipt["items"][0]["product"]["id"] = str(unknown_product_id)
+        affected, counts = set(), {"created": 0, "updated": 0}
+
+        _apply_receipt(receipt, affected, counts)
+
+        self.assertEqual(DeferredReceipt.objects.count(), 1)
+        self.assertFalse(ReceiptSaleLine.objects.filter(receipt_id=self.receipt_id).exists())
+
+        product = Product.objects.create(
+            korona_id=unknown_product_id,
+            number="NEW-1",
+            name="New Product",
+            normalized_name="newproduct",
+        )
+        replay_deferred_receipts()
+
+        self.assertFalse(DeferredReceipt.objects.exists())
+        self.assertEqual(
+            ReceiptSaleLine.objects.get(receipt_id=self.receipt_id, product=product).quantity,
+            Decimal("6"),
+        )
+        self.assertEqual(
+            SalesDailySummary.objects.get(store=self.store, product=product).quantity_sold,
+            Decimal("6"),
+        )
+
     def test_cancelled_receipt_removes_previous_contribution(self):
         affected, counts = set(), {"created": 0, "updated": 0}
         _apply_receipt(self.receipt(3), affected, counts)
         _apply_receipt(self.receipt(3, revision=2, cancelled=True), affected, counts)
-        summary = SalesDailySummary.objects.get(store=self.store, product=self.product)
-        self.assertEqual(summary.quantity_sold, Decimal("0"))
-        self.assertEqual(summary.receipts_count, 0)
+        self.assertFalse(SalesDailySummary.objects.filter(store=self.store, product=self.product).exists())
         self.assertFalse(ReceiptSaleLine.objects.exists())
+
+    def test_return_offsets_sales_regardless_of_import_order(self):
+        returned = self.receipt(-2, revision=1)
+        sold = self.receipt(5, revision=2)
+        sold["id"] = str(uuid.uuid4())
+
+        affected, counts = set(), {"created": 0, "updated": 0}
+        _apply_receipt(returned, affected, counts)
+        _apply_receipt(sold, affected, counts)
+
+        summary = SalesDailySummary.objects.get(store=self.store, product=self.product)
+        self.assertEqual(summary.quantity_sold, Decimal("3"))
+        self.assertEqual(summary.receipts_count, 2)
 
     def test_supplier_names_use_compact_catalog_aliases(self):
         self.assertEqual(supplier_short_name("Southern Glazer's Wine & Spirits of FL"), "Southern")
@@ -216,9 +384,6 @@ class ReceiptSyncTests(TestCase):
         total = recalculate_monthly_need(self.store.id, self.product.id, today.replace(day=1))
 
         self.assertEqual(total.needed_quantity, Decimal("16.5"))
-        self.assertEqual(total.avg_daily_sales_90, 0)
-        self.assertEqual(total.seasonal_quantity, 0)
-        self.assertEqual(total.calculation_version, "trailing-30-v1")
 
     def test_stale_monthly_totals_are_refreshed_in_bulk(self):
         today = timezone.localdate()
@@ -229,13 +394,93 @@ class ReceiptSyncTests(TestCase):
             store=self.store,
             month=today.replace(day=1),
             needed_quantity=999,
-            calculation_version="weighted-v1",
+            last_calculated_at=timezone.now() - timedelta(days=1),
         )
 
         self.assertEqual(recalculate_stale_monthly_needs(), 1)
         cached.refresh_from_db()
         self.assertEqual(cached.needed_quantity, 7)
-        self.assertEqual(cached.calculation_version, "trailing-30-v1")
+
+    def test_full_monthly_rebuild_replaces_all_current_totals(self):
+        today = timezone.localdate()
+        ReceiptSaleLine.objects.create(
+            receipt_id=uuid.uuid4(),
+            receipt_revision=10,
+            store=self.store,
+            product=self.product,
+            sales_date=today,
+            quantity=9,
+        )
+        self.product.productmonthlyneed_set.create(
+            store=self.store, month=today.replace(day=1), needed_quantity=999
+        )
+
+        counts = rebuild_all_monthly_needs()
+
+        rebuilt = self.product.productmonthlyneed_set.get(store=self.store, month=today.replace(day=1))
+        self.assertEqual(rebuilt.needed_quantity, 9)
+        self.assertEqual(rebuilt.avg_daily_sales_30, Decimal("0.3"))
+        self.assertEqual(counts["monthly_totals_rebuilt"], 1)
+        self.assertEqual(counts["daily_summaries_rebuilt"], 1)
+
+    @patch("orders.services.KoronaClient")
+    def test_full_month_download_replaces_stale_day_before_rebuilding(self, client_class):
+        today = timezone.localdate()
+        stale_receipt_id = uuid.uuid4()
+        ReceiptSaleLine.objects.create(
+            receipt_id=stale_receipt_id,
+            receipt_revision=1,
+            store=self.store,
+            product=self.product,
+            sales_date=today,
+            quantity=99,
+        )
+        SalesDailySummary.objects.create(
+            store=self.store,
+            product=self.product,
+            sales_date=today,
+            quantity_sold=99,
+            receipts_count=1,
+            last_receipt_revision=1,
+        )
+        fresh_receipt = self.receipt(4, revision=8)
+        fresh_receipt["bookingTime"] = timezone.now().isoformat()
+        client = client_class.return_value
+        client.account_path.return_value = "accounts/test/receipts"
+        client.request.return_value = {"results": [fresh_receipt]}
+
+        counts = sync_monthly_receipt_history(days=1)
+
+        self.assertFalse(ReceiptSaleLine.objects.filter(receipt_id=stale_receipt_id).exists())
+        fresh_line = ReceiptSaleLine.objects.get(receipt_id=self.receipt_id)
+        self.assertEqual(fresh_line.quantity, Decimal("4"))
+        summary = SalesDailySummary.objects.get(
+            store=self.store, product=self.product, sales_date=today
+        )
+        self.assertEqual(summary.quantity_sold, Decimal("4"))
+        self.assertEqual(counts["seen"], 1)
+        params = client.request.call_args.kwargs["params"]
+        self.assertEqual(params["voidedItems"], "true")
+        self.assertEqual(params["page"], 1)
+        self.assertIn("minBookingTime", params)
+        self.assertIn("maxBookingTime", params)
+
+    def test_nightly_monthly_reconciliation_fetches_full_window_before_rebuilding(self):
+        with patch(
+            "orders.services.sync_monthly_receipt_history",
+            return_value={"seen": 5, "created": 1, "updated": 2, "deferred": 0, "days_refreshed": 30},
+        ) as replay, patch(
+            "orders.services.rebuild_all_monthly_needs",
+            return_value={"seen": 3, "created": 3, "updated": 0, "daily_summaries_rebuilt": 9, "monthly_totals_rebuilt": 3},
+        ) as rebuild:
+            counts = reconcile_monthly_needs()
+
+        replay.assert_called_once_with(days=30)
+        rebuild.assert_called_once_with()
+        self.assertEqual(counts["seen"], 5)
+        self.assertEqual(counts["monthly_totals_rebuilt"], 3)
+        self.assertEqual(counts["daily_summaries_rebuilt"], 9)
+        self.assertEqual(counts["days_refreshed"], 30)
 
 
 class OrderApiTests(TestCase):
@@ -414,6 +659,75 @@ class OrderApiTests(TestCase):
         response = self.client.get("/api/products/search/?q=99")
 
         self.assertEqual([row["id"] for row in response.json()], [ninety_nine.id])
+
+    def test_multi_word_search_returns_and_ranks_all_matching_sizes(self):
+        expected = []
+        for size in ["50ML", "200ML", "375ML", "750ML"]:
+            product = Product.objects.create(
+                korona_id=uuid.uuid4(),
+                number=f"BAN-{size}",
+                name=f"99 {size} BANANA",
+                normalized_name=f"99{size.lower()}banana",
+                active=False,
+                raw_data={"listed": True, "deactivated": False},
+            )
+            expected.append(product.id)
+        Product.objects.create(
+            korona_id=uuid.uuid4(),
+            number="OTHER-99",
+            name="99 APPLES 375ML",
+            normalized_name="99apples375ml",
+        )
+        Product.objects.create(
+            korona_id=uuid.uuid4(),
+            number="OTHER-BAN",
+            name="BANANAS RUM 750ML",
+            normalized_name="bananasrum750ml",
+        )
+
+        response = self.client.get("/api/products/search/?q=99%20bananas")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({row["id"] for row in response.json()}, set(expected))
+
+        order_list = OrderList.objects.create(
+            store=self.store, order_date=date(2026, 7, 20), created_by=self.user
+        )
+        main_order = self.client.post(
+            f"/api/orders/{order_list.id}/items/bulk/",
+            {"product_ids": [expected[0]]},
+            content_type="application/json",
+        )
+        inventory = self.client.post(
+            "/api/inventory/compare/",
+            {"product_ids": [expected[1]]},
+            content_type="application/json",
+        )
+        self.user.is_staff = True
+        self.user.save(update_fields=["is_staff"])
+        bulk_order = BulkOrderList.objects.create(name="Search test", created_by=self.user)
+        bulk = self.client.post(
+            f"/api/bulk-orders/{bulk_order.id}/items/",
+            {"product_ids": [expected[2]]},
+            content_type="application/json",
+        )
+
+        self.assertEqual(main_order.status_code, 201)
+        self.assertEqual([row["id"] for row in inventory.json()["products"]], [expected[1]])
+        self.assertEqual(bulk.status_code, 200)
+        self.assertTrue(bulk_order.items.filter(product_id=expected[2]).exists())
+
+    def test_multi_word_search_matches_words_separated_in_catalog_name(self):
+        product = Product.objects.create(
+            korona_id=uuid.uuid4(),
+            number="BAN-BRAND",
+            name="99 BRAND BANANA 375 ML",
+            normalized_name="99brandbanana375ml",
+        )
+
+        response = self.client.get("/api/products/search/?q=99%20bananas%20375ml")
+
+        self.assertEqual([row["id"] for row in response.json()], [product.id])
 
     def test_category_keyword_overrides_are_saved(self):
         response = self.client.put(
@@ -653,14 +967,6 @@ class OrderApiTests(TestCase):
         response = self.client.get("/api/operations/services/")
         self.assertEqual(response.status_code, 403)
         self.assertEqual(self.client.post("/api/operations/services/stores/run/").status_code, 403)
-        self.assertEqual(
-            self.client.post(
-                "/api/operations/full-sync/",
-                {"confirmation": "FULL RESYNC"},
-                content_type="application/json",
-            ).status_code,
-            403,
-        )
 
     def test_operations_api_reports_per_store_stock_cursor_health(self):
         self.user.is_staff = True
@@ -685,6 +991,7 @@ class OrderApiTests(TestCase):
             duration_ms=1200,
             records_seen=3,
             records_updated=3,
+            metrics={"stores_checked": 1, "seen": 3, "created": 0, "updated": 3, "unchanged": 0},
         )
 
         response = self.client.get("/api/operations/services/")
@@ -697,7 +1004,30 @@ class OrderApiTests(TestCase):
         self.assertEqual(payload["stock_sync"]["latest_incremental"]["changed"], 3)
         self.assertEqual(payload["stock_sync"]["stores"][0]["last_revision"], 456)
         self.assertEqual(payload["stock_sync"]["stores"][0]["stock_records"], 1)
+        self.assertEqual(payload["overview"]["records_changed_24h"], 3)
+        stock_service = next(service for service in payload["services"] if service["name"] == "stocks")
+        self.assertEqual(stock_service["latest_run"]["metrics"]["stores_checked"], 1)
         self.assertIn("description", payload["services"][0])
+        self.assertEqual(
+            {service["name"] for service in payload["services"]},
+            {"stores", "products", "stocks", "stock_reconciliation", "receipts", "monthly_reconciliation"},
+        )
+
+    @patch("orders.tasks.sync_stores_task.delay")
+    def test_manual_job_is_marked_queued_and_cannot_be_duplicated(self, delay):
+        delay.return_value.id = "queued-task"
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+
+        first = self.client.post("/api/operations/services/stores/run/")
+        second = self.client.post("/api/operations/services/stores/run/")
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 409)
+        control = ServiceControl.objects.get(service_name="stores")
+        self.assertEqual(control.status, ServiceControl.Status.QUEUED)
+        delay.assert_called_once_with(force=True)
 
     def test_operations_rejects_invalid_or_fixed_schedule_intervals(self):
         self.user.is_staff = True
@@ -717,6 +1047,127 @@ class OrderApiTests(TestCase):
 
         self.assertEqual(invalid.status_code, 400)
         self.assertEqual(fixed.status_code, 400)
+
+    def test_operations_controls_can_be_disabled_restored_and_rescheduled(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+
+        disabled = self.client.patch(
+            "/api/operations/services/",
+            {"service_name": "stores", "enabled": False},
+            content_type="application/json",
+        )
+        restored = self.client.patch(
+            "/api/operations/services/",
+            {"service_name": "stores", "enabled": True, "interval_seconds": 600},
+            content_type="application/json",
+        )
+
+        self.assertEqual(disabled.status_code, 200)
+        self.assertEqual(restored.status_code, 200)
+        control = ServiceControl.objects.get(service_name="stores")
+        self.assertTrue(control.enabled)
+        self.assertEqual(control.status, ServiceControl.Status.IDLE)
+        self.assertEqual(control.interval_seconds, 600)
+        self.assertEqual(control.updated_by, self.user)
+
+    def test_every_operations_run_button_queues_the_correct_task(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+        task_targets = {
+            "stores": "orders.tasks.sync_stores_task.delay",
+            "products": "orders.tasks.sync_products_task.delay",
+            "stocks": "orders.tasks.sync_stocks_task.delay",
+            "stock_reconciliation": "orders.tasks.reconcile_stocks_task.delay",
+            "receipts": "orders.tasks.sync_receipts_task.delay",
+            "monthly_reconciliation": "orders.tasks.reconcile_monthly_totals_task.delay",
+        }
+
+        for service_name, target in task_targets.items():
+            with self.subTest(service_name=service_name), patch(target) as delay:
+                delay.return_value.id = f"{service_name}-task"
+                response = self.client.post(f"/api/operations/services/{service_name}/run/")
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(response.json()["task_id"], f"{service_name}-task")
+                delay.assert_called_once_with(force=True)
+
+    @patch("orders.tasks.sync_stores_task.delay", side_effect=RuntimeError("broker unavailable"))
+    def test_operations_queue_failure_is_visible_and_recoverable(self, delay):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+
+        response = self.client.post("/api/operations/services/stores/run/")
+
+        self.assertEqual(response.status_code, 503)
+        control = ServiceControl.objects.get(service_name="stores")
+        self.assertEqual(control.status, ServiceControl.Status.ERROR)
+        self.assertIn("broker unavailable", control.last_error)
+
+    def test_operations_diagnostics_report_errors_latency_endpoints_and_context(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+        ServiceControl.objects.create(
+            service_name="products",
+            status=ServiceControl.Status.ERROR,
+            last_error="KORONA timed out",
+        )
+        ApiRequestLog.objects.create(
+            method="GET", url_path="/products", status_code=200, latency_ms=200
+        )
+        ApiRequestLog.objects.create(
+            method="GET", url_path="/products", status_code=503, latency_ms=1400
+        )
+        SystemLog.objects.create(
+            level="ERROR",
+            source="products",
+            message="Product import failed",
+            context={"page": 17, "retryable": True},
+        )
+
+        response = self.client.get("/api/operations/services/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["overview"]["errors"], 1)
+        self.assertEqual(payload["overview"]["attention"][0]["name"], "products")
+        self.assertEqual(payload["api_health"]["requests_24h"], 2)
+        self.assertEqual(payload["api_health"]["errors_24h"], 1)
+        self.assertEqual(payload["api_health"]["average_ms"], 800)
+        self.assertEqual(payload["api_health"]["slow_requests_24h"], 1)
+        self.assertEqual(payload["api_health"]["endpoints"][0]["errors"], 1)
+        self.assertEqual(payload["api_latency"][0]["method"], "GET")
+        self.assertEqual(payload["logs"][0]["context"]["page"], 17)
+
+    @override_settings(
+        STORAGES={"staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}}
+    )
+    def test_operations_page_contains_all_diagnostic_controls_and_no_full_resync(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+
+        response = self.client.get("/ops/")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        for element_id in (
+            "ops-attention",
+            "stock-coverage",
+            "run-service-filter",
+            "run-status-filter",
+            "log-level-filter",
+            "log-search",
+            "latency-status-filter",
+            "latency-search",
+            "endpoint-health-list",
+        ):
+            self.assertIn(f'id="{element_id}"', body)
+        self.assertNotIn("Run full resync", body)
+        self.assertEqual(self.client.post("/api/operations/services/full_sync/run/").status_code, 404)
 
     def test_normal_user_gets_only_the_restricted_working_columns(self):
         order_list = OrderList.objects.create(
@@ -859,74 +1310,3 @@ class OrderApiTests(TestCase):
             403,
         )
         self.assertEqual(self.client.delete(f"/api/users/{superuser.id}/").status_code, 403)
-
-    @patch("orders.tasks.full_resync_step_task.delay")
-    def test_superuser_can_start_only_one_full_sync(self, delay):
-        delay.return_value.id = "task-1"
-        self.user.is_staff = True
-        self.user.is_superuser = True
-        self.user.save(update_fields=["is_staff", "is_superuser"])
-        first = self.client.post(
-            "/api/operations/full-sync/",
-            {"confirmation": "FULL RESYNC"},
-            content_type="application/json",
-        )
-        second = self.client.post(
-            "/api/operations/full-sync/",
-            {"confirmation": "FULL RESYNC"},
-            content_type="application/json",
-        )
-        self.assertEqual(first.status_code, 202)
-        self.assertEqual(second.status_code, 409)
-        self.assertEqual(FullSyncJob.objects.count(), 1)
-
-    def test_full_sync_initialization_preserves_orders_and_users(self):
-        order_list = OrderList.objects.create(
-            store=self.store, order_date=date(2026, 7, 18), created_by=self.user
-        )
-        product = Product.objects.create(
-            korona_id=uuid.uuid4(), number="800", name="Preserved", normalized_name="preserved"
-        )
-        item = OrderListItem.objects.create(
-            order_list=order_list, product=product, created_by=self.user, updated_by=self.user
-        )
-        ProductCode.objects.create(product=product, code="800000", normalized_code="800000")
-        ProductStock.objects.create(product=product, store=self.store, actual=4)
-        job = FullSyncJob.objects.create(initiated_by=self.user, active_lock="full-sync")
-
-        initialize_full_sync(job)
-
-        self.assertTrue(get_user_model().objects.filter(pk=self.user.pk).exists())
-        self.assertTrue(OrderList.objects.filter(pk=order_list.pk).exists())
-        self.assertTrue(OrderListItem.objects.filter(pk=item.pk).exists())
-        self.assertTrue(Product.objects.filter(pk=product.pk).exists())
-        self.assertTrue(Store.objects.filter(pk=self.store.pk).exists())
-        self.assertFalse(ProductStock.objects.exists())
-        self.assertFalse(ProductCode.objects.exists())
-
-    @patch("orders.full_sync.KoronaClient")
-    def test_full_sync_catalog_batch_saves_progress_and_advances(self, client_class):
-        korona_id = uuid.uuid4()
-        client_class.return_value.account_path.return_value = "accounts/test/organizationalUnits"
-        client_class.return_value.request.return_value = {
-            "results": [{"id": str(korona_id), "number": "44", "name": "Store 44", "revision": 12}],
-            "resultsTotal": 1,
-            "pagesTotal": 1,
-            "maxRevision": 12,
-            "links": {},
-        }
-        job = FullSyncJob.objects.create(
-            initiated_by=self.user,
-            active_lock="full-sync",
-            status=FullSyncJob.Status.RUNNING,
-            stage=FullSyncJob.Stage.STORES,
-        )
-
-        self.assertTrue(run_full_sync_step(job))
-
-        job.refresh_from_db()
-        self.assertEqual(job.stage, FullSyncJob.Stage.PRODUCTS)
-        self.assertEqual(job.status, FullSyncJob.Status.QUEUED)
-        self.assertEqual(job.stage_progress["stores"]["processed"], 1)
-        self.assertEqual(job.stage_progress["stores"]["status"], "complete")
-        self.assertTrue(Store.objects.filter(korona_id=korona_id, number="44").exists())

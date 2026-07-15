@@ -105,16 +105,21 @@ class ReceiptSaleLine(TimeStampedModel):
         indexes = [models.Index(fields=["store", "product", "sales_date"])]
 
 
+class DeferredReceipt(TimeStampedModel):
+    """Latest receipt payload waiting for a referenced store or product."""
+
+    receipt_id = models.UUIDField(unique=True)
+    receipt_revision = models.BigIntegerField(default=0, db_index=True)
+    raw_data = models.JSONField(default=dict)
+    reason = models.CharField(max_length=255, blank=True)
+
+
 class ProductMonthlyNeed(TimeStampedModel):
     store = models.ForeignKey(Store, on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     month = models.DateField(db_index=True)
     needed_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     avg_daily_sales_30 = models.DecimalField(max_digits=12, decimal_places=5, default=0)
-    avg_daily_sales_90 = models.DecimalField(max_digits=12, decimal_places=5, default=0)
-    seasonal_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
-    confidence = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    calculation_version = models.CharField(max_length=32, default="trailing-30-v1")
     last_calculated_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -215,6 +220,7 @@ class UserGridPreference(TimeStampedModel):
 class ServiceControl(TimeStampedModel):
     class Status(models.TextChoices):
         IDLE = "idle", "Idle"
+        QUEUED = "queued", "Queued"
         RUNNING = "running", "Running"
         DISABLED = "disabled", "Disabled"
         ERROR = "error", "Error"
@@ -259,44 +265,8 @@ class SyncRun(TimeStampedModel):
     records_seen = models.PositiveIntegerField(default=0)
     records_created = models.PositiveIntegerField(default=0)
     records_updated = models.PositiveIntegerField(default=0)
+    metrics = models.JSONField(default=dict, blank=True)
     error_message = models.TextField(blank=True)
-
-
-class FullSyncJob(TimeStampedModel):
-    class Status(models.TextChoices):
-        QUEUED = "queued", "Queued"
-        RUNNING = "running", "Running"
-        SUCCESS = "success", "Success"
-        ERROR = "error", "Error"
-
-    class Stage(models.TextChoices):
-        INITIALIZE = "initialize", "Initialize"
-        STORES = "stores", "Stores"
-        PRODUCTS = "products", "Products"
-        STOCKS = "stocks", "Stocks"
-        RECEIPTS = "receipts", "Receipts"
-        TOTALS = "totals", "30-day totals"
-        COMPLETE = "complete", "Complete"
-
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.QUEUED, db_index=True)
-    stage = models.CharField(max_length=20, choices=Stage.choices, default=Stage.INITIALIZE)
-    processed = models.PositiveIntegerField(default=0)
-    total = models.PositiveIntegerField(default=0)
-    current_batch = models.PositiveIntegerField(default=0)
-    total_batches = models.PositiveIntegerField(default=0)
-    stage_progress = models.JSONField(default=dict, blank=True)
-    checkpoint = models.JSONField(default=dict, blank=True)
-    step_number = models.PositiveIntegerField(default=0)
-    active_lock = models.CharField(max_length=20, null=True, blank=True, unique=True)
-    celery_task_id = models.CharField(max_length=255, blank=True)
-    started_at = models.DateTimeField(null=True, blank=True)
-    finished_at = models.DateTimeField(null=True, blank=True)
-    heartbeat_at = models.DateTimeField(null=True, blank=True)
-    error_message = models.TextField(blank=True)
-    initiated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
-
-    class Meta:
-        ordering = ["-created_at"]
 
 
 class SystemLog(TimeStampedModel):

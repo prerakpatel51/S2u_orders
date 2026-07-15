@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 class KoronaError(RuntimeError):
-    pass
+    def __init__(self, message, *, status_code=None, error_code=""):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
 
 
 class KoronaClient:
@@ -74,8 +77,26 @@ class KoronaClient:
                 ApiRequestLog.objects.create(
                     method=method.upper(), url_path=logged_path, latency_ms=latency
                 )
-            logger.exception("KORONA request failed: %s %s", method, path)
-            raise KoronaError(str(exc)) from exc
+            status_code = response.status_code if response is not None else None
+            error_code = ""
+            detail = str(exc)
+            if response is not None:
+                try:
+                    error_payload = response.json()
+                except ValueError:
+                    error_payload = {}
+                error_code = str(error_payload.get("code") or "")
+                detail = str(error_payload.get("message") or detail)
+            safe_error = f"KORONA {status_code or 'request'} error"
+            if error_code:
+                safe_error += f" {error_code}"
+            safe_error += f": {detail} ({method.upper()} {logged_path})"
+            logger.exception("KORONA request failed: %s %s", method, logged_path)
+            raise KoronaError(
+                safe_error,
+                status_code=status_code,
+                error_code=error_code,
+            ) from exc
 
     def paginated(self, suffix, params=None, page_size=100):
         params = {**(params or {}), "size": page_size, "page": 1}
@@ -105,4 +126,9 @@ class KoronaClient:
             f"organizationalUnits/{organizational_unit_id}/productStocks",
             params=params,
             page_size=page_size or settings.KORONA_STOCK_PAGE_SIZE,
+        )
+
+    def organizational_unit(self, organizational_unit_id):
+        return self.request(
+            "GET", self.account_path(f"organizationalUnits/{organizational_unit_id}")
         )
