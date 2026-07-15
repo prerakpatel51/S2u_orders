@@ -668,8 +668,6 @@ class OrderApiTests(TestCase):
                 number=f"BAN-{size}",
                 name=f"99 {size} BANANA",
                 normalized_name=f"99{size.lower()}banana",
-                active=False,
-                raw_data={"listed": True, "deactivated": False},
             )
             expected.append(product.id)
         Product.objects.create(
@@ -716,6 +714,37 @@ class OrderApiTests(TestCase):
         self.assertEqual([row["id"] for row in inventory.json()["products"]], [expected[1]])
         self.assertEqual(bulk.status_code, 200)
         self.assertTrue(bulk_order.items.filter(product_id=expected[2]).exists())
+
+    def test_inactive_listed_products_are_hidden_and_unavailable_for_new_orders(self):
+        inactive = Product.objects.create(
+            korona_id=uuid.uuid4(),
+            number="LEGACY-TITO",
+            name="TITO'S 50ML",
+            normalized_name="titos50ml",
+            active=False,
+            raw_data={"listed": True, "deactivated": False},
+        )
+        active = Product.objects.create(
+            korona_id=uuid.uuid4(),
+            number="ACTIVE-TITO",
+            name="TITO'S 50ML",
+            normalized_name="titos50ml",
+            active=True,
+        )
+        order_list = OrderList.objects.create(
+            store=self.store, order_date=date(2026, 7, 21), created_by=self.user
+        )
+
+        search = self.client.get("/api/products/search/?q=tito")
+        add_inactive = self.client.post(
+            f"/api/orders/{order_list.id}/items/bulk/",
+            {"product_ids": [inactive.id]},
+            content_type="application/json",
+        )
+
+        self.assertEqual([row["id"] for row in search.json()], [active.id])
+        self.assertEqual(add_inactive.status_code, 400)
+        self.assertFalse(order_list.items.filter(product=inactive).exists())
 
     def test_multi_word_search_matches_words_separated_in_catalog_name(self):
         product = Product.objects.create(

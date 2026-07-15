@@ -65,10 +65,8 @@ def can_edit_order(user, order_list):
 
 
 def available_products():
-    """Products that KORONA still lists, including rows whose active flag is false."""
-    return Product.objects.filter(
-        Q(active=True) | Q(raw_data__listed=True, raw_data__deactivated=False)
-    )
+    """Products currently active in KORONA and available for new order workflows."""
+    return Product.objects.filter(active=True)
 
 
 class StaffRequiredMixin(UserPassesTestMixin):
