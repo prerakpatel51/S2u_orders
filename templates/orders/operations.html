@@ -8,6 +8,11 @@
 <section id="ops-overview" class="ops-overview" aria-label="Job health"></section>
 <section id="ops-attention" class="ops-attention" hidden></section>
 
+<section class="ops-setting-panel">
+  <div><p class="eyebrow">Catalog visibility</p><h2>Inactive products</h2><p>Inactive KORONA records stay available for historical reporting. Choose whether they also appear in search and new-order workflows.</p></div>
+  <div class="ops-setting-control"><span id="inactive-product-summary">Loading product counts...</span><label class="switch" title="Show inactive products"><input id="show-inactive-products" type="checkbox"><span></span></label><strong id="inactive-product-state">Hidden</strong></div>
+</section>
+
 <section class="ops-stock-panel">
   <div class="ops-section-head"><div><p class="eyebrow">Inventory cache</p><h2>Stock synchronization health</h2><p>Store-by-store cursor health, latest changes, and nightly repair coverage.</p></div><span id="stock-health-badge" class="status">Loading</span></div>
   <div id="stock-coverage" class="stock-coverage"></div>
@@ -35,4 +40,4 @@
   <div class="latency-layout"><div><h3>Endpoint health · last 24 hours</h3><div class="table-scroll diagnostic-table"><table class="data-table"><thead><tr><th>Endpoint</th><th>Requests</th><th>Errors</th><th>Average</th><th>Slowest</th></tr></thead><tbody id="endpoint-health-list"></tbody></table></div></div><details><summary>Latest individual requests</summary><div class="table-scroll diagnostic-table"><table class="data-table"><thead><tr><th>Endpoint</th><th>Status</th><th>Latency</th><th>Time</th></tr></thead><tbody id="latency-list"></tbody></table></div></details></div>
 </section>
 {% endblock %}
-{% block scripts %}<script src="{% static 'orders/operations.js' %}?v=20260715c"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'orders/operations.js' %}?v=20260715d"></script>{% endblock %}

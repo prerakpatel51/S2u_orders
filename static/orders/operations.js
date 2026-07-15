@@ -88,6 +88,14 @@ function renderServices(data) {
   }).join('');
 }
 
+function renderProductVisibility(data) {
+  const visibility = data.product_visibility;
+  const toggle = document.getElementById('show-inactive-products');
+  toggle.checked = visibility.show_inactive;
+  document.getElementById('inactive-product-state').textContent = visibility.show_inactive ? 'Shown' : 'Hidden';
+  document.getElementById('inactive-product-summary').textContent = `${Number(visibility.active_count).toLocaleString()} active · ${Number(visibility.inactive_count).toLocaleString()} inactive`;
+}
+
 function renderStockSync(data) {
   const stock = data.stock_sync;
   const badge = document.getElementById('stock-health-badge');
@@ -178,7 +186,7 @@ async function loadOperations() {
     operationsData = data;
     document.getElementById('ops-counts').innerHTML = Object.entries(data.counts).map(([name, value]) => `<div><span>${escapeOps(countLabels[name] || name.replaceAll('_', ' '))}</span><strong>${Number(value).toLocaleString()}</strong></div>`).join('');
     document.getElementById('ops-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
-    renderOverview(data); renderStockSync(data); renderServices(data); renderDiagnostics();
+    renderOverview(data); renderProductVisibility(data); renderStockSync(data); renderServices(data); renderDiagnostics();
     lucide.createIcons();
     clearTimeout(operationsTimer);
     const active = data.services.some(service => ['queued', 'running'].includes(service.status));
@@ -222,6 +230,20 @@ serviceList.addEventListener('click', async event => {
 });
 
 document.getElementById('refresh-ops').addEventListener('click', () => loadOperations().catch(error => showToast(error.message, true)));
+document.getElementById('show-inactive-products').addEventListener('change', async event => {
+  const toggle = event.target;
+  toggle.disabled = true;
+  try {
+    await apiFetch('/api/operations/services/', {method: 'PATCH', body: JSON.stringify({show_inactive_products: toggle.checked})});
+    showToast(toggle.checked ? 'Inactive products are now shown' : 'Inactive products are now hidden');
+    await loadOperations();
+  } catch (error) {
+    showToast(error.message, true);
+    await loadOperations();
+  } finally {
+    toggle.disabled = false;
+  }
+});
 document.getElementById('ops-attention').addEventListener('click', event => {
   const button = event.target.closest('[data-focus-service]');
   if (!button) return;

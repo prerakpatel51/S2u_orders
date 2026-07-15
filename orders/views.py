@@ -39,6 +39,7 @@ from .models import (
     Store,
     SyncState,
     SyncRun,
+    SystemSetting,
     SystemLog,
     UserGridPreference,
 )
@@ -66,7 +67,10 @@ def can_edit_order(user, order_list):
 
 def available_products():
     """Products currently active in KORONA and available for new order workflows."""
-    return Product.objects.filter(active=True)
+    show_inactive = SystemSetting.objects.filter(
+        key="show_inactive_products", value=True
+    ).exists()
+    return Product.objects.all() if show_inactive else Product.objects.filter(active=True)
 
 
 class StaffRequiredMixin(UserPassesTestMixin):
@@ -894,6 +898,11 @@ class ServicesAPIView(APIView):
             if stock_status_counts["stale"] or stock_status_counts["missing"]
             else "healthy"
         )
+        show_inactive_products = SystemSetting.objects.filter(
+            key="show_inactive_products", value=True
+        ).exists()
+        active_product_count = Product.objects.filter(active=True).count()
+        inactive_product_count = Product.objects.filter(active=False).count()
         since = now - timedelta(hours=24)
         daily_run_totals = SyncRun.objects.filter(
             job_name__in=SERVICES,
@@ -967,6 +976,11 @@ class ServicesAPIView(APIView):
                     "products": Product.objects.count(),
                     "stock_records": ProductStock.objects.count(),
                     "thirty_day_totals": ProductMonthlyNeed.objects.filter(month=month_start()).count(),
+                },
+                "product_visibility": {
+                    "show_inactive": show_inactive_products,
+                    "active_count": active_product_count,
+                    "inactive_count": inactive_product_count,
                 },
                 "stock_sync": {
                     "health": stock_health,
@@ -1061,6 +1075,17 @@ class ServicesAPIView(APIView):
         )
 
     def patch(self, request):
+        if "show_inactive_products" in request.data:
+            show_inactive = request.data["show_inactive_products"]
+            if not isinstance(show_inactive, bool):
+                return Response(
+                    {"show_inactive_products": "Use true or false."}, status=400
+                )
+            SystemSetting.objects.update_or_create(
+                key="show_inactive_products",
+                defaults={"value": show_inactive, "updated_by": request.user},
+            )
+            return Response({"show_inactive_products": show_inactive})
         service_name = request.data.get("service_name")
         if service_name not in SERVICES:
             return Response({"detail": "Unknown service."}, status=404)

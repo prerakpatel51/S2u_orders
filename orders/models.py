@@ -217,6 +217,17 @@ class UserGridPreference(TimeStampedModel):
         unique_together = [("user", "grid_key")]
 
 
+class SystemSetting(TimeStampedModel):
+    key = models.CharField(max_length=128, unique=True)
+    value = models.JSONField(default=dict, blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+
+    def __str__(self):
+        return self.key
+
+
 class ServiceControl(TimeStampedModel):
     class Status(models.TextChoices):
         IDLE = "idle", "Idle"

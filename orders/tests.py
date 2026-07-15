@@ -24,6 +24,7 @@ from .models import (
     SalesDailySummary,
     ServiceControl,
     Store,
+    SystemSetting,
     SystemLog,
     SyncState,
     SyncRun,
@@ -746,6 +747,29 @@ class OrderApiTests(TestCase):
         self.assertEqual(add_inactive.status_code, 400)
         self.assertFalse(order_list.items.filter(product=inactive).exists())
 
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+        enabled = self.client.patch(
+            "/api/operations/services/",
+            {"show_inactive_products": True},
+            content_type="application/json",
+        )
+        visible_search = self.client.get("/api/products/search/?q=tito")
+        add_visible_inactive = self.client.post(
+            f"/api/orders/{order_list.id}/items/bulk/",
+            {"product_ids": [inactive.id]},
+            content_type="application/json",
+        )
+
+        self.assertEqual(enabled.status_code, 200)
+        self.assertTrue(SystemSetting.objects.get(key="show_inactive_products").value)
+        self.assertEqual(
+            {row["id"] for row in visible_search.json()}, {active.id, inactive.id}
+        )
+        self.assertEqual(add_visible_inactive.status_code, 201)
+        self.assertTrue(order_list.items.filter(product=inactive).exists())
+
     def test_multi_word_search_matches_words_separated_in_catalog_name(self):
         product = Product.objects.create(
             korona_id=uuid.uuid4(),
@@ -1185,6 +1209,7 @@ class OrderApiTests(TestCase):
         body = response.content.decode()
         for element_id in (
             "ops-attention",
+            "show-inactive-products",
             "stock-coverage",
             "run-service-filter",
             "run-status-filter",

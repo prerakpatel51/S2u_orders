@@ -16,6 +16,7 @@ from .models import (
     Store,
     SyncRun,
     SyncState,
+    SystemSetting,
     SystemLog,
     UserGridPreference,
 )
@@ -55,6 +56,7 @@ admin.site.register(
         ServiceControl,
         SyncState,
         SyncRun,
+        SystemSetting,
         SystemLog,
         ApiRequestLog,
     ]
