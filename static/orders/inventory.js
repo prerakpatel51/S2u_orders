@@ -108,11 +108,11 @@ function buildGrid(payload) {
     headerClass: `${['store-blue', 'store-green', 'store-peach', 'store-lilac', 'store-mint'][index % 5]}-header`,
     cellClass: `${['store-blue', 'store-green', 'store-peach', 'store-lilac', 'store-mint'][index % 5]}-cell`,
     valueGetter: params => params.data.stores.find(item => item.store_id === store.id), cellRenderer: pairedRenderer,
-    comparator: (a, b) => Number(a?.stock || 0) - Number(b?.stock || 0),
+    comparator: (a, b) => gridNumberCompare(a?.stock, b?.stock),
   }));
   const columnDefs = [
-    {field: 'number', headerName: 'Product #', pinned: 'left', width: 115, filter: true},
-    {field: 'name', headerName: 'Product name', pinned: 'left', minWidth: 210, width: 280, filter: true},
+    {field: 'number', headerName: 'Product #', pinned: 'left', width: 115, filter: true, comparator: gridNaturalCompare},
+    {field: 'name', headerName: 'Product name', pinned: 'left', minWidth: 210, width: 280, filter: true, comparator: gridNaturalCompare},
     ...storeColumns,
     {colId: 'remove', headerName: '', pinned: 'right', width: 42, minWidth: 42, maxWidth: 42, sortable: false, filter: false, resizable: false, cellRenderer: removeRenderer},
   ];

@@ -29,6 +29,7 @@
   {% endif %}
   <main class="app-main">{% block content %}{% endblock %}</main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="{% static 'orders/grid_sorting.js' %}?v=20260715a"></script>
   <script src="{% static 'orders/common.js' %}"></script>
   {% block scripts %}{% endblock %}
 </body>

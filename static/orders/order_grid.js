@@ -227,36 +227,36 @@ async function saveTransferDraft() {
 
 function coreColumns() {
   const columns = [
-    {field: 'product_number', headerName: 'Product #', pinned: 'left', width: 110, minWidth: 96},
-    {field: 'product_name', headerName: 'Product name', pinned: 'left', width: 210, minWidth: 150, filter: ProductNameCategoryFilter},
-    {field: 'commodity_group', headerName: 'Commodity group', width: 165, minWidth: 130},
-    {field: 'commodity_group_number', headerName: 'Commodity group #', width: 130, minWidth: 110, hide: true},
+    {field: 'product_number', headerName: 'Product #', pinned: 'left', width: 110, minWidth: 96, comparator: gridNaturalCompare},
+    {field: 'product_name', headerName: 'Product name', pinned: 'left', width: 210, minWidth: 150, filter: ProductNameCategoryFilter, comparator: gridNaturalCompare},
+    {field: 'commodity_group', headerName: 'Commodity group', width: 165, minWidth: 130, comparator: gridNaturalCompare},
+    {field: 'commodity_group_number', headerName: 'Commodity group #', width: 130, minWidth: 110, hide: true, comparator: gridNaturalCompare},
     {
-      field: 'supplier_name', headerName: 'Supplier', width: 120, minWidth: 96,
+      field: 'supplier_name', headerName: 'Supplier', width: 120, minWidth: 96, comparator: gridNaturalCompare,
       editable: params => orderPermissions.isAdmin && params.data.supplier_options.length > 1,
       cellEditor: 'agSelectCellEditor',
       cellEditorParams: params => ({values: [...new Set(params.data.supplier_options.map(option => option.short_name))]}),
       cellClass: params => orderPermissions.isAdmin && params.data.supplier_options.length > 1 ? 'editable-cell' : '',
       tooltipValueGetter: params => params.data.supplier_full_name,
     },
-    {field: 'supplier_number', headerName: 'Supplier #', width: 105, minWidth: 90, hide: true},
-    {field: 'supplier_order_code', headerName: 'Supplier order code', width: 145, minWidth: 120, hide: true},
-    {field: 'supplier_pack_size', headerName: 'Case / pack', width: 105, minWidth: 90, hide: true, type: 'numericColumn', valueFormatter: quantityFormat},
-    {field: 'supplier_purchase_price', headerName: 'Purchase price', width: 115, minWidth: 100, hide: true, type: 'numericColumn', valueFormatter: params => Number(params.value || 0).toLocaleString(undefined, {style: 'currency', currency: 'USD'})},
-    {field: 'supplier_names', headerName: 'All suppliers', width: 260, minWidth: 180, hide: true},
-    {field: 'on_shelf_quantity', headerName: 'Shelf', pinned: 'left', width: 88, minWidth: 78, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, cellClass: orderPermissions.canEdit ? 'editable-cell stock-input-cell' : 'stock-input-cell', type: 'numericColumn'},
+    {field: 'supplier_number', headerName: 'Supplier #', width: 105, minWidth: 90, hide: true, comparator: gridNaturalCompare},
+    {field: 'supplier_order_code', headerName: 'Supplier order code', width: 145, minWidth: 120, hide: true, comparator: gridNaturalCompare},
+    {field: 'supplier_pack_size', headerName: 'Case / pack', width: 105, minWidth: 90, hide: true, type: 'numericColumn', comparator: gridNumberCompare, valueFormatter: quantityFormat},
+    {field: 'supplier_purchase_price', headerName: 'Purchase price', width: 115, minWidth: 100, hide: true, type: 'numericColumn', comparator: gridNumberCompare, valueFormatter: params => Number(params.value || 0).toLocaleString(undefined, {style: 'currency', currency: 'USD'})},
+    {field: 'supplier_names', headerName: 'All suppliers', width: 260, minWidth: 180, hide: true, comparator: gridNaturalCompare},
+    {field: 'on_shelf_quantity', headerName: 'Shelf', pinned: 'left', width: 88, minWidth: 78, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, cellClass: orderPermissions.canEdit ? 'editable-cell stock-input-cell' : 'stock-input-cell', type: 'numericColumn', comparator: gridNumberCompare},
   ];
   if (orderPermissions.isAdmin) {
     columns.push(
-      {colId: 'current_store', headerName: 'System stock', pinned: 'left', width: 96, minWidth: 84, headerClass: 'store-blue-header', cellClass: 'store-blue-cell', valueGetter: p => ({stock: p.data.current_store_stock, monthly_needed: p.data.current_store_monthly_needed}), cellRenderer: pairedRenderer, comparator: (a, b) => a.stock - b.stock},
-      {field: 'joe_quantity', headerName: 'JOE', pinned: 'left', width: 82, minWidth: 72, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, headerClass: 'joe-header', cellClass: 'editable-cell joe-cell', type: 'numericColumn'},
-      {field: 'bt_quantity', headerName: 'BT', pinned: 'left', width: 82, minWidth: 72, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, headerClass: 'bt-header', cellClass: 'editable-cell bt-cell', type: 'numericColumn'},
-      {field: 'sqw_quantity', headerName: 'SQW', pinned: 'left', width: 82, minWidth: 72, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, headerClass: 'sqw-header', cellClass: 'editable-cell sqw-cell', type: 'numericColumn'},
+      {colId: 'current_store', headerName: 'System stock', pinned: 'left', width: 96, minWidth: 84, headerClass: 'store-blue-header', cellClass: 'store-blue-cell', valueGetter: p => ({stock: p.data.current_store_stock, monthly_needed: p.data.current_store_monthly_needed}), cellRenderer: pairedRenderer, comparator: (a, b) => gridNumberCompare(a?.stock, b?.stock)},
+      {field: 'joe_quantity', headerName: 'JOE', pinned: 'left', width: 82, minWidth: 72, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, headerClass: 'joe-header', cellClass: 'editable-cell joe-cell', type: 'numericColumn', comparator: gridNumberCompare},
+      {field: 'bt_quantity', headerName: 'BT', pinned: 'left', width: 82, minWidth: 72, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, headerClass: 'bt-header', cellClass: 'editable-cell bt-cell', type: 'numericColumn', comparator: gridNumberCompare},
+      {field: 'sqw_quantity', headerName: 'SQW', pinned: 'left', width: 82, minWidth: 72, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, headerClass: 'sqw-header', cellClass: 'editable-cell sqw-cell', type: 'numericColumn', comparator: gridNumberCompare},
     );
   } else {
-    columns.push({colId: 'current_store', headerName: 'System stock', pinned: 'left', width: 110, minWidth: 96, headerClass: 'store-blue-header', cellClass: 'store-blue-cell', valueGetter: p => ({stock: p.data.current_store_stock, monthly_needed: p.data.current_store_monthly_needed}), cellRenderer: pairedRenderer, comparator: (a, b) => a.stock - b.stock});
+    columns.push({colId: 'current_store', headerName: 'System stock', pinned: 'left', width: 110, minWidth: 96, headerClass: 'store-blue-header', cellClass: 'store-blue-cell', valueGetter: p => ({stock: p.data.current_store_stock, monthly_needed: p.data.current_store_monthly_needed}), cellRenderer: pairedRenderer, comparator: (a, b) => gridNumberCompare(a?.stock, b?.stock)});
   }
-  columns.push({field: 'notes', headerName: 'Notes', width: 200, editable: orderPermissions.canEdit, hide: orderPermissions.isAdmin, cellClass: orderPermissions.canEdit ? 'editable-cell' : ''});
+  columns.push({field: 'notes', headerName: 'Notes', width: 200, editable: orderPermissions.canEdit, hide: orderPermissions.isAdmin, cellClass: orderPermissions.canEdit ? 'editable-cell' : '', comparator: gridNaturalCompare});
   return columns;
 }
 
@@ -267,7 +267,7 @@ function otherStoreColumns() {
     colId: `store_${store.id}`, headerName: store.number, width: 90, minWidth: 80, hide: true,
     headerClass: `${colors[index % colors.length]}-header`, cellClass: `${colors[index % colors.length]}-cell`,
     valueGetter: params => params.data.other_stores.find(item => item.store_id === store.id) || {stock: 0, monthly_needed: 0},
-    cellRenderer: pairedRenderer, comparator: (a, b) => a.stock - b.stock,
+    cellRenderer: pairedRenderer, comparator: (a, b) => gridNumberCompare(a?.stock, b?.stock),
   }));
 }
 
@@ -276,7 +276,7 @@ function transferColumns() {
   const hide = orderPermissions.isAdmin;
   return [
     {colId: 'transfer_store', headerName: 'Transfer from', width: 122, minWidth: 110, hide, sortable: false, filter: false, cellRenderer: transferStoreRenderer},
-    ...(!orderPermissions.isAdmin ? [{colId: 'transfer_to', headerName: 'Transfer to', width: 110, valueGetter: p => p.data.transfers?.length ? orderData.order.store.number : '—'}] : []),
+    ...(!orderPermissions.isAdmin ? [{colId: 'transfer_to', headerName: 'Transfer to', width: 110, valueGetter: p => p.data.transfers?.length ? orderData.order.store.number : '—', comparator: gridNaturalCompare}] : []),
     {colId: 'transfer_quantity', headerName: 'Transfer bottles', width: 108, minWidth: 96, hide, sortable: false, filter: false, cellClass: 'transfer-quantity-cell', cellRenderer: transferQuantityRenderer},
   ];
 }
