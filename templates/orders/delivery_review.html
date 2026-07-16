@@ -36,22 +36,22 @@
 
 <section class="backup-panel recovery-workspace">
   <div class="backup-panel-head">
-    <div><p class="eyebrow">Independent disaster recovery</p><h2>Recovery downloads and protection</h2><p>Download a portable ZIP containing the exact dated folder hierarchy, delivery index, checksums, and optional historical catalogs.</p></div>
-    <div class="backup-actions"><button id="sync-replicas" class="secondary-button"><i data-lucide="refresh-cw"></i>Retry unsynced files</button><button id="create-backup" class="secondary-button"><i data-lucide="database-backup"></i>Create DR catalog</button></div>
+    <div><p class="eyebrow">Disaster recovery</p><h2>Recovery and downloads</h2><p>Protected copies, filtered exports, and complete DR downloads.</p></div>
+    <div class="backup-actions"><button id="sync-replicas" class="secondary-button" title="Retry files that have not copied to DR"><i data-lucide="refresh-cw"></i>Retry sync</button><button id="create-backup" class="secondary-button" title="Create a new DR metadata catalog"><i data-lucide="database-backup"></i>New catalog</button></div>
   </div>
   <div id="replication-health" class="replication-health"></div>
 
   <div class="recovery-export-builder">
-    <div class="recovery-export-intro"><span class="recovery-export-icon"><i data-lucide="archive"></i></span><div><h3>Build a recovery ZIP</h3><p>Leave filters blank for every delivery, or narrow the download by date, one or more stores, and keywords.</p></div></div>
+    <div class="recovery-export-intro"><span class="recovery-export-icon"><i data-lucide="archive"></i></span><div><h3>Build recovery ZIP</h3><p>Leave filters blank for all deliveries, or narrow by date, stores, and keywords.</p></div></div>
     <div class="recovery-export-grid">
       <label><span>From date</span><input id="export-date-from" type="date"></label>
       <label><span>To date</span><input id="export-date-to" type="date"></label>
-      <label><span>Stores</span><select id="export-stores" multiple size="4" aria-label="Stores to export"></select><small>Use Ctrl/Cmd or tap to select multiple.</small></label>
-      <label><span>Keywords</span><select id="export-keywords" multiple size="4" aria-label="Keywords to export"></select><small>Matching any selected keyword is included.</small></label>
+      <label><span>Stores</span><select id="export-stores" multiple size="3" aria-label="Stores to export"></select><small>Ctrl/Cmd or tap for multiple.</small></label>
+      <label><span>Keywords</span><select id="export-keywords" multiple size="3" aria-label="Keywords to export"></select><small>Matches any selected keyword.</small></label>
     </div>
     <div class="recovery-export-actions">
       <label class="export-catalog-toggle"><input id="export-catalogs" type="checkbox" checked><span>Include historical metadata catalogs</span></label>
-      <div><button id="export-filtered" class="secondary-button"><i data-lucide="list-filter"></i>Build filtered ZIP</button><button id="export-all" class="primary-button"><i data-lucide="archive-restore"></i>Download entire DR + backups</button></div>
+      <div><button id="export-filtered" class="secondary-button"><i data-lucide="list-filter"></i>Build filtered ZIP</button><button id="export-all" class="secondary-button recovery-all-action"><i data-lucide="archive-restore"></i>Build full DR ZIP</button></div>
     </div>
   </div>
 
@@ -66,4 +66,4 @@
   <footer><div id="gallery-caption"></div><div id="gallery-thumbnails" class="gallery-thumbnail-rail"></div></footer>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{% static 'orders/delivery_common.js' %}?v=20260716c"></script><script src="{% static 'orders/delivery_review.js' %}?v=20260716c"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'orders/delivery_common.js' %}?v=20260716c"></script><script src="{% static 'orders/delivery_review.js' %}?v=20260716d"></script>{% endblock %}

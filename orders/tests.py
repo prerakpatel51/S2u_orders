@@ -1659,6 +1659,20 @@ class DeliveryProofTests(TestCase):
         self.assertContains(response, 'id="detail-gallery-thumbnails"')
         self.assertContains(response, "delivery_detail.js?v=20260716c")
 
+    @override_settings(
+        STORAGES={"staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}}
+    )
+    def test_delivery_review_includes_compact_recovery_controls(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.get("/deliveries/review/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Recovery and downloads")
+        self.assertContains(response, 'class="secondary-button recovery-all-action"')
+        self.assertContains(response, "Build full DR ZIP")
+        self.assertContains(response, "delivery_review.js?v=20260716d")
+
     def test_worker_can_create_draft_with_notes_and_only_sees_own_deliveries(self):
         response = self.client.post(
             "/api/deliveries/",
