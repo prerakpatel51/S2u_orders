@@ -308,14 +308,15 @@ class OrderItemCreateAPIView(APIView):
         item = order_list.items.filter(product=product).first()
         created = item is None
         if item:
+            order_list.items.exclude(pk=item.pk).update(row_order=F("row_order") + 1)
             item.current_stock_snapshot = stock_value
             item.monthly_needed_snapshot = need_value
             item.on_shelf_quantity = on_shelf
+            item.row_order = 0
             item.updated_by = request.user
-            item.save(update_fields=["current_stock_snapshot", "monthly_needed_snapshot", "on_shelf_quantity", "updated_by", "updated_at"])
+            item.save(update_fields=["current_stock_snapshot", "monthly_needed_snapshot", "on_shelf_quantity", "row_order", "updated_by", "updated_at"])
         else:
-            # Make space for a new capture at the top without moving an
-            # already-listed product when its shelf count is updated.
+            # Make space for a newly captured product at the top of the list.
             order_list.items.update(row_order=F("row_order") + 1)
             item = OrderListItem.objects.create(
                 order_list=order_list,
