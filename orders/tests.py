@@ -1,5 +1,7 @@
 import hashlib
+import json
 import uuid
+import zipfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
@@ -20,6 +22,7 @@ from .models import (
     DeliveryBackup,
     DeliveryEvent,
     DeliveryKeyword,
+    DeliveryRecoveryExport,
     OrderItemTransfer,
     OrderList,
     OrderListItem,
@@ -1818,3 +1821,165 @@ class DeliveryProofTests(TestCase):
         self.assertTrue(data["dr_storage_configured"])
         self.assertEqual(data["replication"]["coverage_percent"], 100.0)
         self.assertEqual(data["replication"]["verified_assets"], 1)
+
+    def test_inline_admin_queue_includes_proof_assets_without_opening_each_delivery(self):
+        delivery = self.create_delivery(status=Delivery.Status.SUBMITTED)
+        asset = self.add_asset(delivery, DeliveryAsset.Category.INVOICE, "invoice.jpg")
+        self.client.force_login(self.admin)
+
+        data = self.client.get("/api/deliveries/?inline=1").json()
+
+        self.assertEqual(data["deliveries"][0]["assets"][0]["uuid"], str(asset.uuid))
+        self.assertEqual(data["deliveries"][0]["assets"][0]["view_url"], f"/api/delivery-assets/{asset.uuid}/view/")
+        self.assertEqual(data["upload_max_bytes"], 12 * 1024 * 1024)
+
+    @patch("orders.tasks.build_delivery_recovery_export_task.delay")
+    def test_admin_can_queue_filtered_multi_store_keyword_recovery_export(self, delay):
+        second_store = Store.objects.create(
+            korona_id=uuid.uuid4(), number="202", name="Uptown", active=True
+        )
+        self.client.force_login(self.admin)
+
+        response = self.client.post(
+            "/api/delivery-recovery-exports/",
+            {
+                "scope": "filtered",
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-31",
+                "store_ids": [self.store.id, second_store.id],
+                "keywords": ["Supplier Claim", "Holiday Rush"],
+                "include_catalogs": True,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        export = DeliveryRecoveryExport.objects.get(uuid=response.json()["uuid"])
+        self.assertEqual(export.filters["store_ids"], [self.store.id, second_store.id])
+        self.assertEqual(export.filters["keywords"], ["supplier claim", "holiday rush"])
+        self.assertTrue(export.include_catalogs)
+        delay.assert_called_once_with(export.pk)
+
+    @patch("orders.tasks.build_delivery_recovery_export_task.delay")
+    def test_entire_recovery_export_ignores_filters_and_includes_catalogs(self, delay):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            "/api/delivery-recovery-exports/",
+            {
+                "scope": "all",
+                "date_from": "2026-07-01",
+                "store_ids": [self.store.id],
+                "keywords": ["ignored"],
+                "include_catalogs": True,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        export = DeliveryRecoveryExport.objects.get(uuid=response.json()["uuid"])
+        self.assertEqual(export.scope, "all")
+        self.assertEqual(export.filters, {})
+        delay.assert_called_once_with(export.pk)
+
+    def test_recovery_export_rejects_an_invalid_date_range(self):
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            "/api/delivery-recovery-exports/",
+            {"scope": "filtered", "date_from": "2026-07-31", "date_to": "2026-07-01"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @patch("orders.delivery_storage.put_dr_file")
+    @patch("orders.delivery_storage.write_dr_object_to_zip")
+    def test_filtered_recovery_zip_preserves_bucket_path_and_has_indexes(
+        self, write_object, put_file
+    ):
+        from .delivery_storage import build_recovery_export
+
+        delivery = self.create_delivery(
+            delivered_at=timezone.make_aware(datetime(2026, 7, 15, 12, 0)),
+            status=Delivery.Status.VERIFIED,
+        )
+        keyword = DeliveryKeyword.objects.create(
+            name="Supplier Claim", normalized_name="supplier claim", created_by=self.admin
+        )
+        delivery.keywords.add(keyword)
+        asset = self.add_asset(delivery, DeliveryAsset.Category.INVOICE, "bill.jpg")
+        DeliveryAssetReplica.objects.create(
+            asset=asset,
+            status=DeliveryAssetReplica.Status.VERIFIED,
+            object_key=asset.object_key,
+            size_bytes=asset.size_bytes,
+            checksum_sha256="e" * 64,
+        )
+        ignored = self.create_delivery(
+            delivered_at=timezone.make_aware(datetime(2026, 8, 2, 12, 0))
+        )
+        self.add_asset(ignored, DeliveryAsset.Category.BOXES, "ignored.jpg")
+        export = DeliveryRecoveryExport.objects.create(
+            scope="filtered",
+            filters={
+                "date_from": "2026-07-01",
+                "date_to": "2026-07-31",
+                "store_ids": [self.store.id],
+                "keywords": ["supplier claim"],
+            },
+            include_catalogs=False,
+            created_by=self.admin,
+        )
+        captured = {}
+
+        def write_fake(archive, object_key):
+            archive.writestr(object_key, b"proof-bytes")
+
+        def put_fake(object_key, file_object, _content_type, **_kwargs):
+            file_object.seek(0)
+            captured["key"] = object_key
+            captured["zip"] = file_object.read()
+            return len(captured["zip"]), "f" * 64
+
+        write_object.side_effect = write_fake
+        put_file.side_effect = put_fake
+
+        key, delivery_count, file_count, _size, _checksum = build_recovery_export(export)
+
+        with zipfile.ZipFile(BytesIO(captured["zip"])) as archive:
+            names = archive.namelist()
+            manifest = json.loads(archive.read("catalog/export-manifest.json"))
+            csv_text = archive.read("catalog/deliveries.csv").decode()
+        self.assertEqual(key, captured["key"])
+        self.assertEqual(delivery_count, 1)
+        self.assertEqual(file_count, 4)
+        self.assertIn(asset.object_key, names)
+        self.assertIn("README.txt", names)
+        self.assertEqual(manifest["object_paths"], [asset.object_key])
+        self.assertIn(str(delivery.uuid), csv_text)
+        write_object.assert_called_once()
+
+    @patch("orders.delivery_storage.put_dr_file", return_value=(1024, "a" * 64))
+    @patch("orders.delivery_storage.write_dr_object_to_zip")
+    @patch("orders.delivery_storage.list_dr_objects")
+    def test_entire_recovery_zip_lists_all_delivery_and_backup_objects(
+        self, list_objects, write_object, _put_file
+    ):
+        from .delivery_storage import build_recovery_export
+
+        delivery_key = "deliveries/2026/07/15/store-101/delivery-test/invoice/bill.jpg"
+        backup_key = "backups/delivery-metadata/2026/07/15/catalog.json.gz"
+        list_objects.side_effect = lambda prefix: iter(
+            [{"key": delivery_key, "size_bytes": 20, "last_modified": timezone.now()}]
+            if prefix == "deliveries/"
+            else [{"key": backup_key, "size_bytes": 10, "last_modified": timezone.now()}]
+        )
+        write_object.side_effect = lambda archive, key: archive.writestr(key, b"x")
+        export = DeliveryRecoveryExport.objects.create(
+            scope="all", include_catalogs=True, created_by=self.admin
+        )
+
+        _key, _deliveries, files, _size, _checksum = build_recovery_export(export)
+
+        self.assertEqual(files, 5)
+        self.assertEqual(
+            [call.args[1] for call in write_object.call_args_list], [delivery_key, backup_key]
+        )

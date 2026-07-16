@@ -2,8 +2,10 @@ import gzip
 import hashlib
 import io
 import json
+import csv
 import mimetypes
 import re
+import shutil
 import tempfile
 import zipfile
 from pathlib import PurePosixPath
@@ -203,6 +205,31 @@ def put_dr_bytes(object_key, data, content_type, *, metadata=None):
     return len(body), hashlib.sha256(body).hexdigest()
 
 
+def put_dr_file(object_key, file_object, content_type, *, metadata=None):
+    file_object.seek(0, 2)
+    size = file_object.tell()
+    file_object.seek(0)
+    checksum = hashlib.sha256()
+    for chunk in iter(lambda: file_object.read(1024 * 1024), b""):
+        checksum.update(chunk)
+    digest = checksum.hexdigest()
+    file_object.seek(0)
+    dr_client().put_object(
+        Bucket=settings.DELIVERY_DR_BUCKET_NAME,
+        Key=object_key,
+        Body=file_object,
+        ContentLength=size,
+        ContentType=content_type,
+        Metadata={**(metadata or {}), "sha256": digest},
+    )
+    head = dr_client().head_object(Bucket=settings.DELIVERY_DR_BUCKET_NAME, Key=object_key)
+    if int(head.get("ContentLength", -1)) != size:
+        raise DeliveryStorageError("The recovery export size verification failed.")
+    if head.get("Metadata", {}).get("sha256") != digest:
+        raise DeliveryStorageError("The recovery export checksum verification failed.")
+    return size, digest
+
+
 def get_bytes(object_key, *, allow_dr=True):
     try:
         response = client().get_object(Bucket=settings.DELIVERY_BUCKET_NAME, Key=object_key)
@@ -223,6 +250,36 @@ def get_bytes(object_key, *, allow_dr=True):
 
 def delete_object(object_key):
     client().delete_object(Bucket=settings.DELIVERY_BUCKET_NAME, Key=object_key)
+
+
+def delete_dr_object(object_key):
+    dr_client().delete_object(Bucket=settings.DELIVERY_DR_BUCKET_NAME, Key=object_key)
+
+
+def list_dr_objects(prefix):
+    paginator = dr_client().get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=settings.DELIVERY_DR_BUCKET_NAME, Prefix=prefix):
+        for item in page.get("Contents", []):
+            yield {
+                "key": item["Key"],
+                "size_bytes": int(item.get("Size", 0)),
+                "last_modified": item.get("LastModified"),
+            }
+
+
+def write_dr_object_to_zip(archive, object_key):
+    try:
+        response = dr_client().get_object(
+            Bucket=settings.DELIVERY_DR_BUCKET_NAME, Key=object_key
+        )
+        body = response["Body"]
+        with archive.open(object_key, "w", force_zip64=True) as target:
+            shutil.copyfileobj(body, target, length=1024 * 1024)
+        body.close()
+    except Exception as exc:
+        raise DeliveryStorageError(
+            f"Recovery object {object_key} could not be added to the export."
+        ) from exc
 
 
 def queue_asset_replication(asset_id):
@@ -411,6 +468,175 @@ def build_delivery_zip(delivery):
             archive.writestr(relative, get_bytes(asset.object_key))
     output.seek(0)
     return output
+
+
+def build_recovery_export(export):
+    """Build a portable ZIP from DR while preserving every bucket object key."""
+    from django.db.models import Q
+
+    from .models import Delivery, DeliveryAsset, DeliveryAssetReplica
+
+    deliveries = Delivery.objects.select_related(
+        "store", "submitted_by", "reviewed_by"
+    ).prefetch_related("keywords", "assets__replica")
+    filters = dict(export.filters or {})
+    if export.scope != "all":
+        if filters.get("date_from"):
+            deliveries = deliveries.filter(delivered_at__date__gte=filters["date_from"])
+        if filters.get("date_to"):
+            deliveries = deliveries.filter(delivered_at__date__lte=filters["date_to"])
+        store_ids = [int(value) for value in filters.get("store_ids", []) if str(value).isdigit()]
+        if store_ids:
+            deliveries = deliveries.filter(store_id__in=store_ids)
+        keywords = [str(value).strip().casefold() for value in filters.get("keywords", []) if str(value).strip()]
+        if keywords:
+            keyword_query = Q()
+            for keyword in keywords:
+                keyword_query |= Q(keywords__normalized_name=keyword)
+            deliveries = deliveries.filter(keyword_query).distinct()
+
+    delivery_rows = list(deliveries)
+    selected_keys = []
+    if export.scope == "all":
+        selected_keys.extend(item["key"] for item in list_dr_objects("deliveries/"))
+    else:
+        for delivery in delivery_rows:
+            for asset in delivery.assets.all():
+                if asset.upload_status != DeliveryAsset.UploadStatus.UPLOADED:
+                    continue
+                replica = getattr(asset, "replica", None)
+                if not replica or replica.status != DeliveryAssetReplica.Status.VERIFIED:
+                    raise DeliveryStorageError(
+                        f"Delivery {delivery.uuid} has a file that is not verified in DR yet."
+                    )
+                selected_keys.append(replica.object_key)
+    if export.include_catalogs:
+        selected_keys.extend(item["key"] for item in list_dr_objects("backups/"))
+    selected_keys = list(dict.fromkeys(selected_keys))
+
+    manifest_deliveries = []
+    csv_output = io.StringIO(newline="")
+    writer = csv.writer(csv_output)
+    writer.writerow(
+        [
+            "Delivery ID",
+            "Store number",
+            "Store name",
+            "Delivered at",
+            "Reference",
+            "Status",
+            "Expected cases",
+            "Delivered cases",
+            "Damaged cases",
+            "Submitted by",
+            "Reviewed by",
+            "Keywords",
+            "Object prefix",
+        ]
+    )
+    for delivery in delivery_rows:
+        assets = [
+            {
+                "uuid": str(asset.uuid),
+                "category": asset.category,
+                "object_key": asset.object_key,
+                "filename": asset.original_filename,
+                "content_type": asset.content_type,
+                "size_bytes": asset.size_bytes,
+                "checksum_sha256": asset.checksum_sha256,
+                "dr_status": getattr(asset, "replica", None).status
+                if getattr(asset, "replica", None)
+                else "missing",
+            }
+            for asset in delivery.assets.all()
+            if asset.upload_status == DeliveryAsset.UploadStatus.UPLOADED
+        ]
+        words = list(delivery.keywords.values_list("name", flat=True))
+        manifest_deliveries.append(
+            {
+                "uuid": str(delivery.uuid),
+                "store": {"number": delivery.store.number, "name": delivery.store.name},
+                "delivered_at": delivery.delivered_at,
+                "reference_number": delivery.reference_number,
+                "status": delivery.status,
+                "expected_cases": delivery.expected_cases,
+                "delivered_cases": delivery.delivered_cases,
+                "damaged_cases": delivery.damaged_cases,
+                "general_notes": delivery.general_notes,
+                "issue_notes": delivery.issue_notes,
+                "admin_notes": delivery.admin_notes,
+                "keywords": words,
+                "storage_prefix": delivery.storage_prefix,
+                "assets": assets,
+            }
+        )
+        writer.writerow(
+            [
+                delivery.uuid,
+                delivery.store.number,
+                delivery.store.name,
+                timezone.localtime(delivery.delivered_at).isoformat(),
+                delivery.reference_number,
+                delivery.get_status_display(),
+                delivery.expected_cases,
+                delivery.delivered_cases,
+                delivery.damaged_cases,
+                delivery.submitted_by.get_username(),
+                delivery.reviewed_by.get_username() if delivery.reviewed_by else "",
+                ", ".join(words),
+                delivery.storage_prefix,
+            ]
+        )
+
+    manifest = {
+        "format": "s2u-delivery-recovery-export-v1",
+        "created_at": timezone.now(),
+        "scope": export.scope,
+        "filters": filters,
+        "include_catalogs": export.include_catalogs,
+        "delivery_count": len(delivery_rows),
+        "bucket_object_count": len(selected_keys),
+        "object_paths": selected_keys,
+        "deliveries": manifest_deliveries,
+    }
+    readme = """S2U DELIVERY RECOVERY EXPORT
+
+This archive preserves the exact private-bucket hierarchy.
+
+deliveries/YYYY/MM/DD/store-NUMBER/delivery-UUID/
+  invoice/   Invoice and bill photographs
+  boxes/     Received-case photographs
+  damage/    Damage evidence
+  notes/     Immutable notes snapshots
+
+backups/delivery-metadata/ contains historical compressed metadata catalogs when requested.
+catalog/export-manifest.json describes the export and includes SHA-256 values.
+catalog/deliveries.csv is a human-readable delivery index.
+"""
+    output = tempfile.TemporaryFile()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        archive.writestr("README.txt", readme)
+        archive.writestr(
+            "catalog/export-manifest.json",
+            json.dumps(manifest, cls=DjangoJSONEncoder, indent=2),
+        )
+        archive.writestr("catalog/deliveries.csv", csv_output.getvalue())
+        for object_key in selected_keys:
+            write_dr_object_to_zip(archive, object_key)
+    output.seek(0)
+    stamp = timezone.localtime()
+    key = (
+        f"exports/{stamp:%Y/%m/%d}/"
+        f"delivery-recovery-{export.scope}-{stamp:%Y%m%d-%H%M%S}-{export.uuid}.zip"
+    )
+    size, checksum = put_dr_file(
+        key,
+        output,
+        "application/zip",
+        metadata={"export-format": "s2u-delivery-recovery-v1", "scope": export.scope},
+    )
+    output.close()
+    return key, len(delivery_rows), len(selected_keys) + 3, size, checksum
 
 
 def create_metadata_backup(backup):

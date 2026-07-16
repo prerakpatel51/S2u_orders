@@ -8,7 +8,7 @@ from django.db.models import Count, Q
 from django.http import FileResponse, HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.generic import TemplateView
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from rest_framework import status
@@ -39,6 +39,7 @@ from .models import (
     DeliveryBackup,
     DeliveryEvent,
     DeliveryKeyword,
+    DeliveryRecoveryExport,
     Store,
 )
 
@@ -169,7 +170,7 @@ def delivery_issue_flag(delivery, assets=None):
     return bool(delivery.issue_notes.strip() or delivery.damaged_cases or has_damage or short)
 
 
-def serialize_delivery(delivery, request, *, detail=False):
+def serialize_delivery(delivery, request, *, detail=False, include_assets=False):
     assets = list(delivery.assets.all())
     counts = {category: 0 for category, _ in DeliveryAsset.Category.choices}
     for asset in assets:
@@ -205,8 +206,9 @@ def serialize_delivery(delivery, request, *, detail=False):
         and (delivery.submitted_by_id == request.user.id or is_delivery_admin(request.user)),
         "detail_url": f"/deliveries/{delivery.uuid}/",
     }
-    if detail:
+    if detail or include_assets:
         data["assets"] = [serialize_asset(asset) for asset in assets]
+    if detail:
         data["events"] = [serialize_event(event) for event in delivery.events.all()]
         data["storage_prefix"] = delivery.storage_prefix if is_delivery_admin(request.user) else None
         data["download_url"] = (
@@ -238,7 +240,8 @@ def get_visible_delivery(request, delivery_uuid):
 class DeliveryListAPIView(APIView):
     def get(self, request):
         deliveries = delivery_queryset()
-        if not is_delivery_admin(request.user):
+        delivery_admin = is_delivery_admin(request.user)
+        if not delivery_admin:
             deliveries = deliveries.filter(submitted_by=request.user)
         query = request.query_params.get("q", "").strip()
         if query:
@@ -265,13 +268,25 @@ class DeliveryListAPIView(APIView):
         if request.query_params.get("date_to"):
             deliveries = deliveries.filter(delivered_at__date__lte=request.query_params["date_to"])
         rows = list(deliveries[:200])
+        include_assets = delivery_admin and request.query_params.get("inline") == "1"
         return Response(
             {
-                "deliveries": [serialize_delivery(row, request) for row in rows],
+                "deliveries": [
+                    serialize_delivery(row, request, include_assets=include_assets) for row in rows
+                ],
                 "storage_configured": is_configured(),
+                "upload_max_bytes": settings.DELIVERY_UPLOAD_MAX_BYTES,
                 "statuses": [
                     {"value": value, "label": label} for value, label in Delivery.Status.choices
                 ],
+                "stores": [
+                    {"id": store.id, "number": store.number, "name": store.name}
+                    for store in Store.objects.filter(deliveries__isnull=False)
+                    .distinct()
+                    .order_by("number")
+                ]
+                if delivery_admin
+                else [],
             }
         )
 
@@ -796,6 +811,131 @@ class DeliveryBackupDownloadAPIView(APIView):
                 backup.object_key,
                 filename=f"s2u-delivery-metadata-{backup.created_at:%Y%m%d-%H%M%S}.json.gz",
                 content_type="application/gzip",
+            )
+        except DeliveryStorageError as exc:
+            return Response({"detail": str(exc)}, status=503)
+        return HttpResponseRedirect(url)
+
+
+def serialize_recovery_export(item):
+    return {
+        "uuid": str(item.uuid),
+        "status": item.status,
+        "status_label": item.get_status_display(),
+        "scope": item.scope,
+        "filters": item.filters,
+        "include_catalogs": item.include_catalogs,
+        "delivery_count": item.delivery_count,
+        "file_count": item.file_count,
+        "size_bytes": item.size_bytes,
+        "checksum_sha256": item.checksum_sha256,
+        "error": item.error_message,
+        "created_at": item.created_at,
+        "created_by": user_label(item.created_by) or "System",
+        "expires_at": item.expires_at,
+        "download_url": f"/api/delivery-recovery-exports/{item.uuid}/download/"
+        if item.status == DeliveryRecoveryExport.Status.COMPLETE and item.object_key
+        else None,
+    }
+
+
+class DeliveryRecoveryExportAPIView(APIView):
+    permission_classes = [IsDeliveryAdmin]
+
+    def get(self, request):
+        return Response(
+            {
+                "dr_storage_configured": dr_is_configured(),
+                "exports": [
+                    serialize_recovery_export(item)
+                    for item in DeliveryRecoveryExport.objects.select_related("created_by")[:30]
+                ],
+                "stores": [
+                    {"id": store.id, "number": store.number, "name": store.name}
+                    for store in Store.objects.filter(deliveries__isnull=False)
+                    .distinct()
+                    .order_by("number")
+                ],
+                "keywords": [
+                    {"name": item.name, "value": item.normalized_name}
+                    for item in DeliveryKeyword.objects.all()
+                ],
+                "retention_days": settings.DELIVERY_EXPORT_RETENTION_DAYS,
+            }
+        )
+
+    def post(self, request):
+        if not dr_is_configured():
+            return Response({"detail": "Recovery storage is not configured."}, status=503)
+        scope = "all" if request.data.get("scope") == "all" else "filtered"
+        date_from = str(request.data.get("date_from", "")).strip()
+        date_to = str(request.data.get("date_to", "")).strip()
+        parsed_from = parse_date(date_from) if date_from else None
+        parsed_to = parse_date(date_to) if date_to else None
+        if (date_from and not parsed_from) or (date_to and not parsed_to):
+            return Response({"detail": "Choose valid export dates."}, status=400)
+        if parsed_from and parsed_to and parsed_from > parsed_to:
+            return Response({"detail": "The from date cannot be after the to date."}, status=400)
+        raw_stores = request.data.get("store_ids", [])
+        if not isinstance(raw_stores, list):
+            raw_stores = [raw_stores]
+        store_ids = [int(value) for value in raw_stores if str(value).isdigit()]
+        if store_ids and Store.objects.filter(pk__in=store_ids).count() != len(set(store_ids)):
+            return Response({"detail": "One or more selected stores do not exist."}, status=400)
+        raw_keywords = request.data.get("keywords", [])
+        if not isinstance(raw_keywords, list):
+            raw_keywords = [raw_keywords]
+        keywords = [
+            re.sub(r"\s+", " ", str(value).strip()).casefold()
+            for value in raw_keywords
+            if str(value).strip()
+        ]
+        filters = {}
+        if scope != "all":
+            if parsed_from:
+                filters["date_from"] = parsed_from.isoformat()
+            if parsed_to:
+                filters["date_to"] = parsed_to.isoformat()
+            if store_ids:
+                filters["store_ids"] = list(dict.fromkeys(store_ids))
+            if keywords:
+                filters["keywords"] = list(dict.fromkeys(keywords))
+        export = DeliveryRecoveryExport.objects.create(
+            scope=scope,
+            filters=filters,
+            include_catalogs=(
+                True
+                if scope == "all"
+                else request.data.get("include_catalogs", True) not in (False, 0, "0", "false")
+            ),
+            created_by=request.user,
+        )
+        from .tasks import build_delivery_recovery_export_task
+
+        try:
+            build_delivery_recovery_export_task.delay(export.pk)
+        except Exception as exc:
+            export.status = DeliveryRecoveryExport.Status.FAILED
+            export.error_message = f"The export could not be queued: {exc}"[:2000]
+            export.save(update_fields=["status", "error_message", "updated_at"])
+            return Response({"detail": export.error_message}, status=503)
+        return Response(serialize_recovery_export(export), status=202)
+
+
+class DeliveryRecoveryExportDownloadAPIView(APIView):
+    permission_classes = [IsDeliveryAdmin]
+
+    def get(self, request, export_uuid):
+        export = get_object_or_404(
+            DeliveryRecoveryExport,
+            uuid=export_uuid,
+            status=DeliveryRecoveryExport.Status.COMPLETE,
+        )
+        try:
+            url = signed_dr_download(
+                export.object_key,
+                filename=f"s2u-delivery-recovery-{export.scope}-{export.created_at:%Y%m%d-%H%M%S}.zip",
+                content_type="application/zip",
             )
         except DeliveryStorageError as exc:
             return Response({"detail": str(exc)}, status=503)

@@ -10,8 +10,10 @@ from django.utils import timezone
 from .delivery_storage import (
     create_metadata_backup,
     delete_object,
+    delete_dr_object,
     dr_is_configured,
     is_configured,
+    build_recovery_export,
     replicate_asset,
     verify_asset_replica,
 )
@@ -19,6 +21,7 @@ from .models import (
     DeliveryAsset,
     DeliveryAssetReplica,
     DeliveryBackup,
+    DeliveryRecoveryExport,
     ServiceControl,
     SyncRun,
     SystemLog,
@@ -352,6 +355,64 @@ def reconcile_delivery_replicas_task():
     for replica_id in stale:
         verify_delivery_replica_task.delay(replica_id)
     return {"replication_queued": len(unsynced), "verification_queued": len(stale)}
+
+
+@shared_task(name="orders.tasks.build_delivery_recovery_export_task")
+def build_delivery_recovery_export_task(export_id):
+    try:
+        export = DeliveryRecoveryExport.objects.get(pk=export_id)
+    except DeliveryRecoveryExport.DoesNotExist:
+        return {"skipped": True, "reason": "recovery export no longer exists"}
+    export.status = DeliveryRecoveryExport.Status.RUNNING
+    export.error_message = ""
+    export.save(update_fields=["status", "error_message", "updated_at"])
+    try:
+        key, deliveries, files, size, checksum = build_recovery_export(export)
+        export.object_key = key
+        export.delivery_count = deliveries
+        export.file_count = files
+        export.size_bytes = size
+        export.checksum_sha256 = checksum
+        export.expires_at = timezone.now() + timedelta(
+            days=settings.DELIVERY_EXPORT_RETENTION_DAYS
+        )
+        export.status = DeliveryRecoveryExport.Status.COMPLETE
+        export.save()
+        return {
+            "export_uuid": str(export.uuid),
+            "deliveries": deliveries,
+            "files": files,
+            "size_bytes": size,
+            "checksum_sha256": checksum,
+        }
+    except Exception as exc:
+        logger.exception("Delivery recovery export failed for %s", export.uuid)
+        export.status = DeliveryRecoveryExport.Status.FAILED
+        export.error_message = str(exc)[:2000]
+        export.save(update_fields=["status", "error_message", "updated_at"])
+        return {"export_uuid": str(export.uuid), "failed": True, "error": export.error_message}
+
+
+@shared_task(name="orders.tasks.cleanup_expired_delivery_exports_task")
+def cleanup_expired_delivery_exports_task():
+    expired = list(
+        DeliveryRecoveryExport.objects.filter(
+            status=DeliveryRecoveryExport.Status.COMPLETE,
+            expires_at__lte=timezone.now(),
+        )[:100]
+    )
+    cleaned = 0
+    for export in expired:
+        try:
+            if export.object_key and dr_is_configured():
+                delete_dr_object(export.object_key)
+            export.status = DeliveryRecoveryExport.Status.EXPIRED
+            export.object_key = ""
+            export.save(update_fields=["status", "object_key", "updated_at"])
+            cleaned += 1
+        except Exception:
+            logger.exception("Could not expire delivery recovery export %s", export.uuid)
+    return {"seen": len(expired), "cleaned": cleaned}
 
 
 @shared_task(name="orders.tasks.cleanup_abandoned_delivery_uploads_task")

@@ -7,6 +7,7 @@ const progress = document.getElementById('upload-progress');
 const draftId = new URLSearchParams(location.search).get('draft');
 let currentDeliveryId = draftId;
 let storageConfigured = false;
+let uploadMaxBytes = 12 * 1024 * 1024;
 
 const localDateTimeValue = date => {
   const value = new Date(date); value.setMinutes(value.getMinutes() - value.getTimezoneOffset()); return value.toISOString().slice(0, 16);
@@ -18,6 +19,7 @@ async function initialize() {
     const [stores, deliveryData] = await Promise.all([apiFetch('/api/stores/'), apiFetch('/api/deliveries/')]);
     document.getElementById('delivery-store').innerHTML = '<option value="">Choose a store…</option>' + stores.map(store => `<option value="${store.id}">${escape(store.number)} — ${escape(store.name)}</option>`).join('');
     storageConfigured = deliveryData.storage_configured;
+    uploadMaxBytes = deliveryData.upload_max_bytes || uploadMaxBytes;
     const state = document.getElementById('storage-state');
     state.classList.toggle('ready', storageConfigured); state.classList.toggle('error', !storageConfigured);
     state.innerHTML = `<i data-lucide="${storageConfigured ? 'cloud-check' : 'cloud-off'}"></i>${storageConfigured ? 'Secure storage ready' : 'Storage setup required'}`;
@@ -67,12 +69,18 @@ function payload() {
   return {store_id: document.getElementById('delivery-store').value, delivered_at: new Date(document.getElementById('delivered-at').value).toISOString(), reference_number: document.getElementById('reference-number').value, expected_cases: nullable('expected-cases'), delivered_cases: nullable('delivered-cases'), damaged_cases: nullable('damaged-cases') || 0, general_notes: document.getElementById('general-notes').value, issue_notes: document.getElementById('issue-notes').value};
 }
 
-async function compressImage(file) {
+async function prepareImage(file) {
+  const supported = ['image/jpeg', 'image/png', 'image/webp'].includes(file.type);
+  if (supported && file.size <= uploadMaxBytes) return file;
   const bitmap = await createImageBitmap(file);
-  const maxSide = 2400; const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const maxSide = 4096; const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
   const canvas = document.createElement('canvas'); canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
   const context = canvas.getContext('2d', {alpha: false}); context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
-  return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', {type: 'image/jpeg'})) : reject(new Error('Could not prepare an image.')), 'image/jpeg', .86));
+  const encode = quality => new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not prepare an image.')), 'image/jpeg', quality));
+  let blob = await encode(.94);
+  if (blob.size > uploadMaxBytes) blob = await encode(.88);
+  if (blob.size > uploadMaxBytes) throw new Error(`This photo is still larger than ${Math.round(uploadMaxBytes / 1024 / 1024)} MB after high-quality preparation.`);
+  return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', {type: 'image/jpeg'});
 }
 
 async function checksum(blob) { const bytes = await blob.arrayBuffer(); const hash = await crypto.subtle.digest('SHA-256', bytes); return [...new Uint8Array(hash)].map(value => value.toString(16).padStart(2, '0')).join(''); }
@@ -80,7 +88,7 @@ async function retryUpload(url, blob, headers) { let last; for (let attempt = 1;
 
 async function uploadFile(deliveryId, category, item) {
   let prepared;
-  try { prepared = await compressImage(item.file); } catch (_) { prepared = item.file; }
+  try { prepared = await prepareImage(item.file); } catch (error) { if (item.file.size <= uploadMaxBytes && ['image/jpeg', 'image/png', 'image/webp'].includes(item.file.type)) prepared = item.file; else throw error; }
   const reservation = await apiFetch(`/api/deliveries/${deliveryId}/assets/presign/`, {method: 'POST', body: JSON.stringify({category, filename: prepared.name, content_type: prepared.type, size_bytes: prepared.size})});
   await retryUpload(reservation.upload_url, prepared, reservation.headers);
   await apiFetch(`/api/deliveries/${deliveryId}/assets/${reservation.asset_uuid}/complete/`, {method: 'POST', body: JSON.stringify({checksum_sha256: await checksum(prepared)})});

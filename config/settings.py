@@ -179,6 +179,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "orders.tasks.cleanup_abandoned_delivery_uploads_task",
         "schedule": crontab(minute=15),
     },
+    "cleanup-expired-delivery-exports": {
+        "task": "orders.tasks.cleanup_expired_delivery_exports_task",
+        "schedule": crontab(hour=3, minute=10),
+    },
 }
 
 KORONA_ACCOUNT_ID = os.getenv("KORONA_ACCOUNT_ID", "")
@@ -218,6 +222,9 @@ DELIVERY_DR_BUCKET_REGION = os.getenv("DELIVERY_DR_BUCKET_REGION", "auto")
 DELIVERY_UPLOAD_MAX_BYTES = max(1, int(os.getenv("DELIVERY_UPLOAD_MAX_MB", "12"))) * 1024 * 1024
 DELIVERY_SIGNED_URL_SECONDS = min(
     3600, max(60, int(os.getenv("DELIVERY_SIGNED_URL_SECONDS", "600")))
+)
+DELIVERY_EXPORT_RETENTION_DAYS = max(
+    1, min(30, int(os.getenv("DELIVERY_EXPORT_RETENTION_DAYS", "7")))
 )
 
 LOGGING = {

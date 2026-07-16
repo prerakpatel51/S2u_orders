@@ -8,6 +8,7 @@ from .models import (
     DeliveryBackup,
     DeliveryEvent,
     DeliveryKeyword,
+    DeliveryRecoveryExport,
     DeferredReceipt,
     OrderItemTransfer,
     OrderList,
@@ -86,5 +87,6 @@ admin.site.register(
         DeliveryBackup,
         DeliveryEvent,
         DeliveryKeyword,
+        DeliveryRecoveryExport,
     ]
 )

@@ -43,4 +43,6 @@ urlpatterns = [
     path("deliveries/<uuid:delivery_uuid>/download.zip/", delivery_views.DeliveryDownloadAPIView.as_view(), name="api-delivery-download"),
     path("delivery-backups/", delivery_views.DeliveryBackupAPIView.as_view(), name="api-delivery-backups"),
     path("delivery-backups/<uuid:backup_uuid>/download/", delivery_views.DeliveryBackupDownloadAPIView.as_view(), name="api-delivery-backup-download"),
+    path("delivery-recovery-exports/", delivery_views.DeliveryRecoveryExportAPIView.as_view(), name="api-delivery-recovery-exports"),
+    path("delivery-recovery-exports/<uuid:export_uuid>/download/", delivery_views.DeliveryRecoveryExportDownloadAPIView.as_view(), name="api-delivery-recovery-export-download"),
 ]

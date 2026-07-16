@@ -478,3 +478,37 @@ class DeliveryBackup(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class DeliveryRecoveryExport(TimeStampedModel):
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Building"
+        COMPLETE = "complete", "Ready"
+        FAILED = "failed", "Failed"
+        EXPIRED = "expired", "Expired"
+
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.QUEUED, db_index=True
+    )
+    scope = models.CharField(max_length=16, default="filtered")
+    filters = models.JSONField(default=dict, blank=True)
+    include_catalogs = models.BooleanField(default=True)
+    object_key = models.CharField(max_length=900, blank=True)
+    delivery_count = models.PositiveIntegerField(default=0)
+    file_count = models.PositiveIntegerField(default=0)
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    checksum_sha256 = models.CharField(max_length=64, blank=True)
+    error_message = models.TextField(blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="delivery_recovery_exports",
+        null=True,
+        on_delete=models.SET_NULL,
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["status", "expires_at"])]
