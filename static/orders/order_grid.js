@@ -574,7 +574,7 @@ async function chooseProduct(product, {reopenCamera = false} = {}) {
   const stockElement = document.getElementById('selected-stock'); stockElement.textContent = 'Loading...';
   const existing = orderData.items.find(item => item.product === product.id);
   // Manual selection preserves an existing count; a new item is left blank.
-  document.getElementById('selected-on-shelf').value = existing ? existing.on_shelf_quantity : '';
+  document.getElementById('selected-on-shelf').value = existing ? Number(existing.on_shelf_quantity) : '';
   try {
     const availability = await apiFetch(`/api/products/${product.id}/availability/?order_id=${window.ORDER_LIST_ID}`);
     product.current_stock = availability.current_stock; stockElement.textContent = Number(availability.current_stock).toLocaleString();
