@@ -607,11 +607,8 @@ async function chooseProduct(product, {reopenCamera = false} = {}) {
   const shelfInput = document.getElementById('selected-on-shelf');
   shelfInput.value = existing ? Number(existing.on_shelf_quantity) : '';
   requestAnimationFrame(() => { shelfInput.focus(); if (shelfInput.value) shelfInput.select(); });
-  try {
-    const availability = await apiFetch(`/api/products/${product.id}/availability/?order_id=${window.ORDER_LIST_ID}`);
-    product.current_stock = availability.current_stock; stockElement.textContent = Number(availability.current_stock).toLocaleString();
-    if (availability.stale) showToast('Showing cached stock; live refresh failed', true);
-  } catch (error) { stockElement.textContent = existing ? existing.current_store_stock : '--'; showToast(error.message, true); }
+  // Product search already includes the current locally synchronized stock.
+  stockElement.textContent = Number(product.current_stock ?? existing?.current_store_stock ?? 0).toLocaleString();
 }
 document.getElementById('cancel-product').addEventListener('click', clearSelected);
 function clearSelected() { selectedProduct = null; suggestionProducts = []; suggestionIndex = -1; keyboardSelectionPending = false; selectedPanel.hidden = true; searchResults.hidden = true; searchInput.value = ''; searchInput.focus(); }

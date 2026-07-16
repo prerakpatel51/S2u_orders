@@ -1,4 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from django.conf import settings
@@ -7,7 +6,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.postgres.search import TrigramSimilarity
 from django.core.exceptions import ValidationError
-from django.db import close_old_connections, connection, transaction
+from django.db import connection, transaction
 from django.db.models import Avg, Count, F, Max, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -487,15 +486,6 @@ class ProductSearchAPIView(APIView):
         if order_id:
             store_id = OrderList.objects.filter(pk=order_id).values_list("store_id", flat=True).first()
             if store_id:
-                stale_before = timezone.now() - timedelta(seconds=90)
-                stale_products = [
-                    product
-                    for product in result_products[:12]
-                    if not product.stock_last_synced_at or product.stock_last_synced_at < stale_before
-                ]
-                if stale_products:
-                    with ThreadPoolExecutor(max_workers=min(6, len(stale_products))) as executor:
-                        list(executor.map(_refresh_search_stock, stale_products))
                 stock_map = dict(
                     ProductStock.objects.filter(
                         store_id=store_id, product_id__in=[product.id for product in result_products]
@@ -556,17 +546,6 @@ def _product_search_rank(product, normalized_query, query_word_variants, barcode
         len(name),
         product.name.casefold(),
     )
-
-
-def _refresh_search_stock(product):
-    close_old_connections()
-    try:
-        refresh_product_stocks(product)
-    except Exception:
-        return False
-    finally:
-        close_old_connections()
-    return True
 
 
 class ProductAvailabilityAPIView(APIView):
