@@ -16,6 +16,7 @@ let cameraStream;
 let cameraScanPending = false;
 let cameraScanInProgress = false;
 let cameraScanAttempts = 0;
+let reopenCameraAfterAdd = true;
 let cameraZoomTrack;
 let cameraUsesHardwareZoom = false;
 let suggestionIndex = -1;
@@ -492,7 +493,7 @@ async function searchProducts(selectBestMatch = false) {
     const products = await apiFetch(`/api/products/search/?q=${encodeURIComponent(query)}&order_id=${window.ORDER_LIST_ID}`);
     if (requestId !== searchRequestId) return;
     const scanned = exactBarcodeProduct(products, query);
-    if (scanned) { await chooseProduct(scanned); if (fromCamera) document.getElementById('selected-on-shelf').focus(); else quickAddSelected(); return; }
+    if (scanned) { await chooseProduct(scanned); if (fromCamera) document.getElementById('selected-on-shelf').focus(); else quickAddSelected({increment: true, reopenCamera: false}); return; }
     if (selectBestMatch && products.length) {
       await chooseProduct(products[0]);
       if (quickAddAfterSearch) quickAddSelected();
@@ -571,8 +572,8 @@ async function chooseProduct(product) {
   document.getElementById('selected-name').textContent = product.name; document.getElementById('selected-number').textContent = product.number;
   const stockElement = document.getElementById('selected-stock'); stockElement.textContent = 'Loading...';
   const existing = orderData.items.find(item => item.product === product.id);
-  // Each new scan starts as a fresh count, including products already on the list.
-  document.getElementById('selected-on-shelf').value = 0;
+  // Manual selection preserves an existing count; a new item is left blank.
+  document.getElementById('selected-on-shelf').value = existing ? existing.on_shelf_quantity : '';
   try {
     const availability = await apiFetch(`/api/products/${product.id}/availability/?order_id=${window.ORDER_LIST_ID}`);
     product.current_stock = availability.current_stock; stockElement.textContent = Number(availability.current_stock).toLocaleString();
@@ -581,22 +582,28 @@ async function chooseProduct(product) {
 }
 document.getElementById('cancel-product').addEventListener('click', clearSelected);
 function clearSelected() { selectedProduct = null; suggestionProducts = []; suggestionIndex = -1; keyboardSelectionPending = false; quickAddAfterSearch = false; selectedPanel.hidden = true; searchResults.hidden = true; searchInput.value = ''; searchInput.focus(); }
-function quickAddSelected() {
+function quickAddSelected({increment = false, reopenCamera = true} = {}) {
   if (!selectedProduct) return;
-  document.getElementById('selected-on-shelf').value = 0;
+  const input = document.getElementById('selected-on-shelf');
+  if (increment) {
+    const existing = orderData.items.find(item => item.product === selectedProduct.id);
+    input.value = Number(existing?.on_shelf_quantity || 0) + 1;
+  } else if (!input.value.trim()) input.value = 1;
+  reopenCameraAfterAdd = reopenCamera;
   document.getElementById('add-product').click();
 }
 document.getElementById('add-product').addEventListener('click', async () => {
   if (!selectedProduct) return;
   const button = document.getElementById('add-product'); button.disabled = true; button.textContent = 'Adding...';
+  const shouldReopenCamera = reopenCameraAfterAdd;
+  reopenCameraAfterAdd = true;
   try {
-    const row = await apiFetch(`/api/orders/${window.ORDER_LIST_ID}/items/`, {method: 'POST', body: JSON.stringify({product_id: selectedProduct.id, on_shelf_quantity: Number(document.getElementById('selected-on-shelf').value || 0), refresh_stock: selectedProduct.current_stock === undefined})});
+    const row = await apiFetch(`/api/orders/${window.ORDER_LIST_ID}/items/`, {method: 'POST', body: JSON.stringify({product_id: selectedProduct.id, on_shelf_quantity: Number(document.getElementById('selected-on-shelf').value || 1), refresh_stock: selectedProduct.current_stock === undefined})});
     const existing = gridApi.getRowNode(String(row.id)); if (existing) existing.setData(row); else gridApi.applyTransaction({add: [row]});
     const index = orderData.items.findIndex(item => item.id === row.id); if (index >= 0) orderData.items[index] = row; else orderData.items.push(row);
     updateCount(); clearSelected(); showToast('Product added');
-    // Keep the capture flow moving for shelf counting: return to the scanner
-    // after the quantity has been saved.
-    startCamera();
+    // Keep the camera capture flow moving, without opening it for a physical scanner.
+    if (shouldReopenCamera) startCamera();
   } catch (error) { showToast(error.message, true); } finally { button.disabled = false; button.textContent = 'Add to list'; }
 });
 document.getElementById('clear-batch-selection').addEventListener('click', clearBatchSelection);
