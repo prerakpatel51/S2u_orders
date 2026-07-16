@@ -7,7 +7,8 @@ from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import ServiceControl, SyncRun, SystemLog
+from .delivery_storage import create_metadata_backup, delete_object, is_configured
+from .models import DeliveryAsset, DeliveryBackup, ServiceControl, SyncRun, SystemLog
 from .services import reconcile_monthly_needs, reconcile_stocks, sync_products, sync_receipts, sync_stocks, sync_stores
 
 logger = logging.getLogger(__name__)
@@ -235,3 +236,60 @@ def dispatch_waiting_monthly_reconciliation():
         )
         return False
     return True
+
+
+@shared_task(name="orders.tasks.backup_delivery_metadata_task")
+def backup_delivery_metadata_task():
+    """Create a daily searchable metadata catalog beside the delivery objects."""
+    if not is_configured():
+        return {"skipped": True, "reason": "delivery bucket is not configured"}
+    backup = DeliveryBackup.objects.create()
+    try:
+        key, delivery_count, asset_count, size_bytes = create_metadata_backup(backup)
+        backup.object_key = key
+        backup.delivery_count = delivery_count
+        backup.asset_count = asset_count
+        backup.size_bytes = size_bytes
+        backup.status = DeliveryBackup.Status.COMPLETE
+        backup.save()
+        return {
+            "backup_uuid": str(backup.uuid),
+            "deliveries": delivery_count,
+            "assets": asset_count,
+            "size_bytes": size_bytes,
+        }
+    except Exception as exc:
+        logger.exception("Delivery metadata backup failed")
+        backup.status = DeliveryBackup.Status.FAILED
+        backup.error_message = str(exc)[:2000]
+        backup.save(update_fields=["status", "error_message", "updated_at"])
+        SystemLog.objects.create(
+            level="ERROR", source="delivery.backup", message=backup.error_message
+        )
+        raise
+
+
+@shared_task(name="orders.tasks.cleanup_abandoned_delivery_uploads_task")
+def cleanup_abandoned_delivery_uploads_task():
+    """Remove failed and never-confirmed uploads after clients have had time to retry."""
+    cutoff = timezone.now() - timedelta(hours=24)
+    abandoned = list(
+        DeliveryAsset.objects.filter(
+            upload_status__in=[
+                DeliveryAsset.UploadStatus.PENDING,
+                DeliveryAsset.UploadStatus.FAILED,
+            ],
+            updated_at__lt=cutoff,
+        )[:500]
+    )
+    deleted = 0
+    for asset in abandoned:
+        if is_configured():
+            try:
+                delete_object(asset.object_key)
+            except Exception:
+                logger.warning("Could not remove abandoned delivery object %s", asset.object_key)
+                continue
+        asset.delete()
+        deleted += 1
+    return {"seen": len(abandoned), "deleted": deleted}

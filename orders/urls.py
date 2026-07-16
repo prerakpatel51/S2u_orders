@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import delivery_views, views
 
 urlpatterns = [
     path("health/", views.HealthAPIView.as_view(), name="api-health"),
@@ -30,4 +30,17 @@ urlpatterns = [
     path("operations/services/<str:service_name>/run/", views.ServiceRunAPIView.as_view(), name="api-service-run"),
     path("users/", views.UserListAPIView.as_view(), name="api-users"),
     path("users/<int:pk>/", views.UserDetailAPIView.as_view(), name="api-user-detail"),
+    path("deliveries/", delivery_views.DeliveryListAPIView.as_view(), name="api-deliveries"),
+    path("deliveries/export.csv", delivery_views.DeliveryCSVExportAPIView.as_view(), name="api-delivery-export"),
+    path("deliveries/<uuid:delivery_uuid>/", delivery_views.DeliveryDetailAPIView.as_view(), name="api-delivery-detail"),
+    path("deliveries/<uuid:delivery_uuid>/submit/", delivery_views.DeliverySubmitAPIView.as_view(), name="api-delivery-submit"),
+    path("deliveries/<uuid:delivery_uuid>/review/", delivery_views.DeliveryReviewAPIView.as_view(), name="api-delivery-review"),
+    path("deliveries/<uuid:delivery_uuid>/keywords/", delivery_views.DeliveryKeywordsAPIView.as_view(), name="api-delivery-keywords"),
+    path("delivery-keywords/", delivery_views.DeliveryKeywordsAPIView.as_view(), name="api-delivery-keyword-list"),
+    path("deliveries/<uuid:delivery_uuid>/assets/presign/", delivery_views.DeliveryAssetPresignAPIView.as_view(), name="api-delivery-asset-presign"),
+    path("deliveries/<uuid:delivery_uuid>/assets/<uuid:asset_uuid>/complete/", delivery_views.DeliveryAssetCompleteAPIView.as_view(), name="api-delivery-asset-complete"),
+    path("delivery-assets/<uuid:asset_uuid>/view/", delivery_views.DeliveryAssetViewAPIView.as_view(), name="api-delivery-asset-view"),
+    path("deliveries/<uuid:delivery_uuid>/download.zip/", delivery_views.DeliveryDownloadAPIView.as_view(), name="api-delivery-download"),
+    path("delivery-backups/", delivery_views.DeliveryBackupAPIView.as_view(), name="api-delivery-backups"),
+    path("delivery-backups/<uuid:backup_uuid>/download/", delivery_views.DeliveryBackupDownloadAPIView.as_view(), name="api-delivery-backup-download"),
 ]

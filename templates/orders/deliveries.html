@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Delivery Proof | S2U Orders{% endblock %}
+{% block content %}
+<section class="page-heading delivery-page-heading">
+  <div><p class="eyebrow">Delivery proof</p><h1>Your deliveries</h1><p>Capture invoices, cases, damage, and notes while the delivery is in front of you.</p></div>
+  <div class="page-actions">{% if user.is_staff or user.is_superuser %}<a href="{% url 'delivery-review' %}" class="secondary-button"><i data-lucide="scan-search"></i>Verification workspace</a>{% endif %}<a href="{% url 'delivery-create' %}" class="primary-button"><i data-lucide="camera"></i>Record delivery</a></div>
+</section>
+<section id="delivery-summary" class="delivery-summary" aria-label="Delivery summary"></section>
+<section class="delivery-list-card">
+  <div class="delivery-list-toolbar"><div><h2>Recent submissions</h2><p>Drafts and completed proof from your account.</p></div><div class="delivery-search"><i data-lucide="search"></i><input id="delivery-search" type="search" placeholder="Search store, reference, or notes" aria-label="Search deliveries"></div></div>
+  <div id="delivery-list" class="delivery-list" aria-live="polite"><div class="delivery-loading">Loading deliveries…</div></div>
+</section>
+{% endblock %}
+{% block scripts %}<script src="{% static 'orders/delivery_common.js' %}?v=20260716a"></script><script src="{% static 'orders/deliveries.js' %}?v=20260716a"></script>{% endblock %}

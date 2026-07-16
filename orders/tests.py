@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from unittest.mock import Mock, patch
@@ -13,6 +13,10 @@ from .korona import KoronaError
 from .models import (
     BulkOrderList,
     DeferredReceipt,
+    Delivery,
+    DeliveryAsset,
+    DeliveryEvent,
+    DeliveryKeyword,
     OrderItemTransfer,
     OrderList,
     OrderListItem,
@@ -1505,3 +1509,200 @@ class OrderApiTests(TestCase):
             403,
         )
         self.assertEqual(self.client.delete(f"/api/users/{superuser.id}/").status_code, 403)
+
+
+@override_settings(
+    DELIVERY_BUCKET_ENDPOINT="https://storage.example.test",
+    DELIVERY_BUCKET_NAME="proof-bucket",
+    DELIVERY_BUCKET_ACCESS_KEY_ID="test-key",
+    DELIVERY_BUCKET_SECRET_ACCESS_KEY="test-secret",
+)
+class DeliveryProofTests(TestCase):
+    def setUp(self):
+        self.worker = get_user_model().objects.create_user("driver", password="test-pass-123")
+        self.admin = get_user_model().objects.create_user(
+            "delivery-admin", password="test-pass-123", is_staff=True
+        )
+        self.other = get_user_model().objects.create_user("other-driver", password="test-pass-123")
+        self.store = Store.objects.create(
+            korona_id=uuid.uuid4(), number="101", name="Main Street", active=True
+        )
+        self.client.force_login(self.worker)
+
+    def create_delivery(self, **overrides):
+        values = {
+            "store": self.store,
+            "delivered_at": timezone.now(),
+            "submitted_by": self.worker,
+            "general_notes": "Received by the store manager",
+        }
+        values.update(overrides)
+        return Delivery.objects.create(**values)
+
+    def add_asset(self, delivery, category, name):
+        return DeliveryAsset.objects.create(
+            delivery=delivery,
+            category=category,
+            object_key=f"{delivery.storage_prefix}/{category}/{uuid.uuid4()}-{name}",
+            original_filename=name,
+            content_type="image/jpeg",
+            size_bytes=1234,
+            upload_status=DeliveryAsset.UploadStatus.UPLOADED,
+            uploaded_by=self.worker,
+        )
+
+    def test_worker_can_create_draft_with_notes_and_only_sees_own_deliveries(self):
+        response = self.client.post(
+            "/api/deliveries/",
+            {
+                "store_id": self.store.id,
+                "delivered_at": timezone.now().isoformat(),
+                "reference_number": "INV-4402",
+                "general_notes": "12 cases placed in back room",
+                "issue_notes": "One wet box",
+                "expected_cases": 12,
+                "delivered_cases": 12,
+                "damaged_cases": 1,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        delivery = Delivery.objects.get(uuid=response.json()["uuid"])
+        self.assertEqual(delivery.reference_number, "INV-4402")
+        self.assertEqual(delivery.issue_notes, "One wet box")
+        self.assertTrue(delivery.events.filter(event_type=DeliveryEvent.EventType.CREATED).exists())
+
+        hidden = self.create_delivery(submitted_by=self.other)
+        listed = self.client.get("/api/deliveries/").json()["deliveries"]
+        self.assertNotIn(str(hidden.uuid), [row["uuid"] for row in listed])
+
+    def test_delivery_storage_prefix_is_structured_and_stable(self):
+        delivery = self.create_delivery(
+            delivered_at=timezone.make_aware(datetime(2026, 7, 15, 13, 30))
+        )
+
+        self.assertEqual(
+            delivery.storage_prefix,
+            f"deliveries/2026/07/15/store-101/delivery-{delivery.uuid}",
+        )
+
+    def test_other_worker_cannot_view_delivery_but_admin_can(self):
+        delivery = self.create_delivery()
+        self.client.force_login(self.other)
+        self.assertEqual(self.client.get(f"/api/deliveries/{delivery.uuid}/").status_code, 403)
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get(f"/api/deliveries/{delivery.uuid}/").status_code, 200)
+
+    @patch("orders.delivery_views.presigned_upload", return_value="https://upload.example.test")
+    def test_presign_validates_image_and_creates_pending_asset(self, presign):
+        delivery = self.create_delivery()
+        response = self.client.post(
+            f"/api/deliveries/{delivery.uuid}/assets/presign/",
+            {
+                "category": "invoice",
+                "filename": "Invoice page 1.jpg",
+                "content_type": "image/jpeg",
+                "size_bytes": 4000,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        asset = DeliveryAsset.objects.get(uuid=response.json()["asset_uuid"])
+        self.assertEqual(asset.upload_status, DeliveryAsset.UploadStatus.PENDING)
+        self.assertIn(f"{delivery.storage_prefix}/invoice/", asset.object_key)
+        presign.assert_called_once()
+
+    def test_submit_requires_both_invoice_and_box_photos(self):
+        delivery = self.create_delivery()
+        self.add_asset(delivery, DeliveryAsset.Category.INVOICE, "invoice.jpg")
+
+        response = self.client.post(f"/api/deliveries/{delivery.uuid}/submit/")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("boxes", response.json()["detail"].lower())
+
+    @patch("orders.delivery_views.notes_snapshot")
+    def test_submission_and_admin_review_are_audited(self, snapshot):
+        delivery = self.create_delivery(issue_notes="Two cases missing")
+        self.add_asset(delivery, DeliveryAsset.Category.INVOICE, "invoice.jpg")
+        self.add_asset(delivery, DeliveryAsset.Category.BOXES, "boxes.jpg")
+        submitted = self.client.post(f"/api/deliveries/{delivery.uuid}/submit/")
+        self.assertEqual(submitted.status_code, 200)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, Delivery.Status.SUBMITTED)
+
+        self.client.force_login(self.admin)
+        reviewed = self.client.post(
+            f"/api/deliveries/{delivery.uuid}/review/",
+            {"status": "issue_found", "admin_notes": "Contact supplier for shortage credit."},
+            content_type="application/json",
+        )
+
+        self.assertEqual(reviewed.status_code, 200)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, Delivery.Status.ISSUE_FOUND)
+        self.assertEqual(delivery.reviewed_by, self.admin)
+        self.assertTrue(delivery.events.filter(event_type=DeliveryEvent.EventType.REVIEWED).exists())
+        self.assertEqual(snapshot.call_count, 2)
+
+    @patch("orders.delivery_views.notes_snapshot")
+    def test_admin_keywords_make_delivery_searchable(self, _snapshot):
+        delivery = self.create_delivery(reference_number="INV-123")
+        self.client.force_login(self.admin)
+        saved = self.client.put(
+            f"/api/deliveries/{delivery.uuid}/keywords/",
+            {"keywords": ["Holiday rush", "Supplier claim"]},
+            content_type="application/json",
+        )
+        results = self.client.get("/api/deliveries/?q=holiday").json()["deliveries"]
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual([row["uuid"] for row in results], [str(delivery.uuid)])
+        self.assertTrue(DeliveryKeyword.objects.filter(normalized_name="holiday rush").exists())
+
+    def test_admin_cannot_verify_an_unsubmitted_draft(self):
+        delivery = self.create_delivery()
+        self.client.force_login(self.admin)
+        response = self.client.post(
+            f"/api/deliveries/{delivery.uuid}/review/",
+            {"status": "verified", "admin_notes": "Too early"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+
+    @patch("orders.delivery_views.notes_snapshot")
+    def test_worker_can_answer_needs_information_with_more_notes_and_proof(self, _snapshot):
+        delivery = self.create_delivery()
+        self.add_asset(delivery, DeliveryAsset.Category.INVOICE, "invoice.jpg")
+        self.add_asset(delivery, DeliveryAsset.Category.BOXES, "boxes.jpg")
+        self.assertEqual(self.client.post(f"/api/deliveries/{delivery.uuid}/submit/").status_code, 200)
+        self.client.force_login(self.admin)
+        self.assertEqual(
+            self.client.post(
+                f"/api/deliveries/{delivery.uuid}/review/",
+                {"status": "needs_info", "admin_notes": "Please identify the damaged case."},
+                content_type="application/json",
+            ).status_code,
+            200,
+        )
+        self.client.force_login(self.worker)
+        updated = self.client.patch(
+            f"/api/deliveries/{delivery.uuid}/",
+            {"issue_notes": "Damage is in the case at the left of the stack."},
+            content_type="application/json",
+        )
+        resubmitted = self.client.post(f"/api/deliveries/{delivery.uuid}/submit/")
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(resubmitted.status_code, 200)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, Delivery.Status.SUBMITTED)
+
+    def test_only_admin_can_export_delivery_log(self):
+        self.create_delivery(reference_number="INV-CSV")
+        self.assertEqual(self.client.get("/api/deliveries/export.csv").status_code, 403)
+        self.client.force_login(self.admin)
+        exported = self.client.get("/api/deliveries/export.csv")
+        self.assertEqual(exported.status_code, 200)
+        self.assertIn("INV-CSV", exported.content.decode())

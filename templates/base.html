@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{% static 'orders/app.css' %}?v=20260714d">
+  <link rel="stylesheet" href="{% static 'orders/app.css' %}?v=20260716a">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
   {% block head %}{% endblock %}
 </head>
@@ -18,9 +18,11 @@
   <header class="app-header">
     <a class="brand" href="{% url 'home' %}"><span class="brand-mark">SO</span><span>S2U Orders</span></a>
     <nav class="header-actions" aria-label="Account">
-      {% if user.is_staff or user.is_superuser %}<a class="icon-text-button subtle" href="{% url 'users' %}"><i data-lucide="users"></i><span>Users</span></a>{% endif %}
+      <a class="icon-text-button subtle" href="{% url 'deliveries' %}"><i data-lucide="truck"></i><span>Deliveries</span></a>
+      {% if user.is_staff or user.is_superuser %}<a class="icon-text-button subtle" href="{% url 'delivery-review' %}"><i data-lucide="scan-search"></i><span>Verify</span></a>{% endif %}
+      {% if user.is_staff or user.is_superuser %}<a class="icon-text-button subtle admin-secondary-nav" href="{% url 'users' %}"><i data-lucide="users"></i><span>Users</span></a>{% endif %}
       {% if user.is_superuser %}
-      <a class="icon-text-button subtle" href="{% url 'operations' %}"><i data-lucide="activity"></i><span>Operations</span></a>
+      <a class="icon-text-button subtle admin-secondary-nav" href="{% url 'operations' %}"><i data-lucide="activity"></i><span>Operations</span></a>
       {% endif %}
       <span class="user-name">{{ user.get_short_name|default:user.username }}</span>
       <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="icon-button" title="Log out" aria-label="Log out"><i data-lucide="log-out"></i></button></form>

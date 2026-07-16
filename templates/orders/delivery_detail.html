@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Delivery {{ delivery.store.number }} | S2U Orders{% endblock %}
+{% block content %}
+<div id="delivery-detail" data-delivery-id="{{ delivery.uuid }}" data-is-admin="{{ delivery_admin|yesno:'true,false' }}">
+  <section class="delivery-detail-head"><a href="{% if delivery_admin %}{% url 'delivery-review' %}{% else %}{% url 'deliveries' %}{% endif %}" class="delivery-back"><i data-lucide="arrow-left"></i>{% if delivery_admin %}Verification queue{% else %}Your deliveries{% endif %}</a><div class="delivery-detail-title"><div><p class="eyebrow">Delivery proof</p><h1 id="detail-store">Loading…</h1><p id="detail-subline"></p></div><div id="detail-head-actions"></div></div></section>
+  <section id="detail-alert" class="detail-alert" hidden></section>
+  <div class="verification-layout">
+    <main class="verification-proof">
+      <div class="proof-column"><div class="proof-column-head"><div><span class="proof-step">A</span><div><h2>Invoice / bill</h2><p>Verify products and quantities on every page.</p></div></div><span id="invoice-count" class="proof-count"></span></div><div id="invoice-gallery" class="proof-gallery"></div></div>
+      <div class="proof-column"><div class="proof-column-head"><div><span class="proof-step">B</span><div><h2>Cases received</h2><p>Compare labels, counts, and visible condition.</p></div></div><span id="boxes-count" class="proof-count"></span></div><div id="boxes-gallery" class="proof-gallery"></div><div id="damage-section" class="damage-proof-section" hidden><div class="damage-proof-head"><i data-lucide="triangle-alert"></i><div><h3>Damage / shortage evidence</h3><p>Review these before closing the delivery.</p></div></div><div id="damage-gallery" class="proof-gallery compact"></div></div></div>
+    </main>
+    <aside class="verification-sidebar">
+      <section class="verify-card" id="delivery-facts"></section>
+      <section class="verify-card"><div class="verify-card-title"><i data-lucide="notebook-pen"></i><h2>Delivery notes</h2></div><div id="worker-notes" class="worker-notes"></div></section>
+      {% if delivery_admin %}<section class="verify-card review-action-card"><div class="verify-card-title"><i data-lucide="badge-check"></i><h2>Admin decision</h2></div><label>Status<select id="review-decision"><option value="under_review">Under review</option><option value="needs_info">Needs more information</option><option value="issue_found">Issue found</option><option value="verified">Verified</option><option value="resolved">Resolved</option></select></label><label>Admin notes<textarea id="admin-notes" rows="5" placeholder="Document what was checked, discrepancies, or resolution."></textarea></label><button id="save-review" class="primary-button"><i data-lucide="check"></i>Save verification</button></section>
+      <section class="verify-card"><div class="verify-card-title"><i data-lucide="tags"></i><h2>Search keywords</h2></div><p class="verify-help">Add memorable words such as “holiday”, “shortage”, supplier name, or claim number.</p><div id="keyword-chips" class="keyword-chips"></div><div class="keyword-entry"><input id="keyword-input" maxlength="64" placeholder="Type a keyword"><button id="add-keyword" class="secondary-button">Add</button></div><button id="save-keywords" class="text-button">Save keywords</button></section>{% endif %}
+      <section class="verify-card"><div class="verify-card-title"><i data-lucide="history"></i><h2>Activity</h2></div><div id="delivery-timeline" class="delivery-timeline"></div></section>
+    </aside>
+  </div>
+</div>
+<dialog id="proof-lightbox" class="proof-lightbox"><button class="lightbox-close" aria-label="Close"><i data-lucide="x"></i></button><button class="lightbox-nav previous" aria-label="Previous photo"><i data-lucide="chevron-left"></i></button><div class="lightbox-stage"><img id="lightbox-image" alt="Delivery proof enlarged"><div id="lightbox-caption"></div></div><button class="lightbox-nav next" aria-label="Next photo"><i data-lucide="chevron-right"></i></button></dialog>
+{% endblock %}
+{% block scripts %}<script src="{% static 'orders/delivery_common.js' %}?v=20260716a"></script><script src="{% static 'orders/delivery_detail.js' %}?v=20260716a"></script>{% endblock %}

@@ -7,6 +7,7 @@ S2U Orders is a Django and Django REST Framework order-management application fo
 - Django and Django REST Framework provide the web application and API.
 - PostgreSQL stores users, order lists, cached KORONA data, stock, and rolling sales totals.
 - Redis is the Celery broker and result backend.
+- Railway Object Storage keeps private delivery-proof photos independently of application deploys.
 - Celery Worker runs synchronization jobs.
 - Celery Beat schedules KORONA stores, products, stocks, and receipts synchronization.
 - Docker Compose provides an isolated local development environment.
@@ -101,3 +102,9 @@ Create PostgreSQL and Redis services, then create Web, Worker, and Beat services
 - Beat: `celery -A config beat -l INFO`
 
 Set the variables from `.env.example` on every service. Set `RUN_MIGRATIONS=1` only on the Railway Web service and `RUN_MIGRATIONS=0` on Worker and Beat. Local Compose uses a dedicated one-shot migration service before application containers start.
+
+### Delivery proof storage
+
+Create a private Railway Bucket named `s2u-delivery-proofs`, then inject its S3-compatible credentials into the Web, Worker, and Beat services using the `DELIVERY_BUCKET_*` variables in `.env.example`. Configure bucket CORS to allow `PUT` from the production application origin with the `Content-Type` header. The browser resizes delivery images and uploads them through short-lived signed URLs; the bucket remains private.
+
+Objects are organized as `deliveries/YYYY/MM/DD/store-NUMBER/delivery-UUID/{invoice,boxes,damage,notes}/`. PostgreSQL stores searchable metadata, verification state, keywords, checksums, and the audit trail. A nightly task writes a compressed metadata catalog under `backups/delivery-metadata/`; administrators can also create and download one from the verification workspace. Keep Railway PostgreSQL backups enabled because metadata catalogs complement rather than replace database backups.

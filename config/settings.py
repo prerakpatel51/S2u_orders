@@ -167,6 +167,14 @@ CELERY_BEAT_SCHEDULE = {
             minute=KORONA_MONTHLY_RECONCILE_MINUTE,
         ),
     },
+    "backup-delivery-metadata-nightly": {
+        "task": "orders.tasks.backup_delivery_metadata_task",
+        "schedule": crontab(hour=2, minute=30),
+    },
+    "cleanup-abandoned-delivery-uploads": {
+        "task": "orders.tasks.cleanup_abandoned_delivery_uploads_task",
+        "schedule": crontab(minute=15),
+    },
 }
 
 KORONA_ACCOUNT_ID = os.getenv("KORONA_ACCOUNT_ID", "")
@@ -183,6 +191,21 @@ KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS = max(
 )
 KORONA_STOCK_RECONCILE_INTERVAL_SECONDS = max(
     3600, int(os.getenv("KORONA_STOCK_RECONCILE_INTERVAL_SECONDS", "86400"))
+)
+
+# Railway's private, S3-compatible object storage bucket for delivery proof.
+DELIVERY_BUCKET_ENDPOINT = os.getenv("DELIVERY_BUCKET_ENDPOINT", os.getenv("BUCKET_ENDPOINT", ""))
+DELIVERY_BUCKET_NAME = os.getenv("DELIVERY_BUCKET_NAME", os.getenv("BUCKET_NAME", ""))
+DELIVERY_BUCKET_ACCESS_KEY_ID = os.getenv(
+    "DELIVERY_BUCKET_ACCESS_KEY_ID", os.getenv("BUCKET_ACCESS_KEY_ID", "")
+)
+DELIVERY_BUCKET_SECRET_ACCESS_KEY = os.getenv(
+    "DELIVERY_BUCKET_SECRET_ACCESS_KEY", os.getenv("BUCKET_SECRET_ACCESS_KEY", "")
+)
+DELIVERY_BUCKET_REGION = os.getenv("DELIVERY_BUCKET_REGION", "auto")
+DELIVERY_UPLOAD_MAX_BYTES = max(1, int(os.getenv("DELIVERY_UPLOAD_MAX_MB", "12"))) * 1024 * 1024
+DELIVERY_SIGNED_URL_SECONDS = min(
+    3600, max(60, int(os.getenv("DELIVERY_SIGNED_URL_SECONDS", "600")))
 )
 
 LOGGING = {

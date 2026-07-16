@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import include, path
 
-from orders import views
+from orders import delivery_views, views
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -15,5 +15,13 @@ urlpatterns = [
     path("bulk-orders/<int:pk>/", views.BulkOrderDetailView.as_view(), name="bulk-order-detail"),
     path("ops/", views.OperationsView.as_view(), name="operations"),
     path("users/", views.UsersView.as_view(), name="users"),
+    path("deliveries/", delivery_views.DeliveryDashboardView.as_view(), name="deliveries"),
+    path("deliveries/new/", delivery_views.DeliveryCreateView.as_view(), name="delivery-create"),
+    path("deliveries/review/", delivery_views.DeliveryReviewView.as_view(), name="delivery-review"),
+    path(
+        "deliveries/<uuid:delivery_uuid>/",
+        delivery_views.DeliveryDetailView.as_view(),
+        name="delivery-detail",
+    ),
     path("api/", include("orders.urls")),
 ]

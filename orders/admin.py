@@ -2,6 +2,11 @@ from django.contrib import admin
 
 from .models import (
     ApiRequestLog,
+    Delivery,
+    DeliveryAsset,
+    DeliveryBackup,
+    DeliveryEvent,
+    DeliveryKeyword,
     DeferredReceipt,
     OrderItemTransfer,
     OrderList,
@@ -42,6 +47,22 @@ class OrderListAdmin(admin.ModelAdmin):
     list_filter = ("status", "store")
 
 
+@admin.register(Delivery)
+class DeliveryAdmin(admin.ModelAdmin):
+    list_display = ("uuid", "store", "delivered_at", "status", "submitted_by", "reviewed_by")
+    list_filter = ("status", "store")
+    search_fields = (
+        "uuid",
+        "store__number",
+        "store__name",
+        "reference_number",
+        "general_notes",
+        "issue_notes",
+        "keywords__name",
+    )
+    readonly_fields = ("uuid", "created_at", "updated_at")
+
+
 admin.site.register(
     [
         ProductCode,
@@ -59,5 +80,9 @@ admin.site.register(
         SystemSetting,
         SystemLog,
         ApiRequestLog,
+        DeliveryAsset,
+        DeliveryBackup,
+        DeliveryEvent,
+        DeliveryKeyword,
     ]
 )

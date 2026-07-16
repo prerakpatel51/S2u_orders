@@ -1,3 +1,5 @@
+import uuid
+
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
@@ -296,3 +298,155 @@ class ApiRequestLog(TimeStampedModel):
     url_path = models.TextField()
     status_code = models.PositiveIntegerField(null=True, blank=True)
     latency_ms = models.PositiveIntegerField(default=0)
+
+
+class Delivery(TimeStampedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        SUBMITTED = "submitted", "Submitted"
+        UNDER_REVIEW = "under_review", "Under review"
+        NEEDS_INFO = "needs_info", "Needs more information"
+        ISSUE_FOUND = "issue_found", "Issue found"
+        VERIFIED = "verified", "Verified"
+        RESOLVED = "resolved", "Resolved"
+
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, db_index=True)
+    store = models.ForeignKey(Store, related_name="deliveries", on_delete=models.PROTECT)
+    delivered_at = models.DateTimeField(default=timezone.now, db_index=True)
+    reference_number = models.CharField(max_length=120, blank=True, db_index=True)
+    general_notes = models.TextField(blank=True)
+    issue_notes = models.TextField(blank=True)
+    expected_cases = models.PositiveIntegerField(null=True, blank=True)
+    delivered_cases = models.PositiveIntegerField(null=True, blank=True)
+    damaged_cases = models.PositiveIntegerField(default=0)
+    status = models.CharField(
+        max_length=24, choices=Status.choices, default=Status.DRAFT, db_index=True
+    )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name="submitted_deliveries", on_delete=models.PROTECT
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="reviewed_deliveries",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    admin_notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-delivered_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["status", "delivered_at"]),
+            models.Index(fields=["store", "delivered_at"]),
+            models.Index(fields=["submitted_by", "delivered_at"]),
+        ]
+
+    @property
+    def storage_prefix(self):
+        stamp = timezone.localtime(self.delivered_at)
+        safe_store = "".join(c if c.isalnum() or c in "-_" else "-" for c in self.store.number)
+        return (
+            f"deliveries/{stamp:%Y/%m/%d}/store-{safe_store}/delivery-{self.uuid}"
+        )
+
+    def __str__(self):
+        return f"{self.store} / {timezone.localtime(self.delivered_at):%Y-%m-%d %H:%M}"
+
+
+class DeliveryAsset(TimeStampedModel):
+    class Category(models.TextChoices):
+        INVOICE = "invoice", "Invoice"
+        BOXES = "boxes", "Boxes"
+        DAMAGE = "damage", "Damage"
+        NOTES = "notes", "Notes"
+
+    class UploadStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        UPLOADED = "uploaded", "Uploaded"
+        FAILED = "failed", "Failed"
+
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    delivery = models.ForeignKey(Delivery, related_name="assets", on_delete=models.CASCADE)
+    category = models.CharField(max_length=16, choices=Category.choices, db_index=True)
+    object_key = models.CharField(max_length=900, unique=True)
+    original_filename = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=120)
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    checksum_sha256 = models.CharField(max_length=64, blank=True)
+    upload_status = models.CharField(
+        max_length=16, choices=UploadStatus.choices, default=UploadStatus.PENDING
+    )
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name="delivery_uploads", on_delete=models.PROTECT
+    )
+    position = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["category", "position", "created_at"]
+        indexes = [models.Index(fields=["delivery", "category", "position"])]
+
+
+class DeliveryKeyword(TimeStampedModel):
+    name = models.CharField(max_length=64)
+    normalized_name = models.CharField(max_length=64, unique=True, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name="delivery_keywords_created", on_delete=models.PROTECT
+    )
+    deliveries = models.ManyToManyField(Delivery, related_name="keywords", blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class DeliveryEvent(TimeStampedModel):
+    class EventType(models.TextChoices):
+        CREATED = "created", "Created"
+        UPDATED = "updated", "Updated"
+        PHOTO_ADDED = "photo_added", "Photo added"
+        SUBMITTED = "submitted", "Submitted"
+        REVIEWED = "reviewed", "Reviewed"
+        KEYWORDS_CHANGED = "keywords_changed", "Keywords changed"
+        DOWNLOADED = "downloaded", "Downloaded"
+
+    delivery = models.ForeignKey(Delivery, related_name="events", on_delete=models.CASCADE)
+    event_type = models.CharField(max_length=32, choices=EventType.choices, db_index=True)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, related_name="delivery_events", null=True, on_delete=models.SET_NULL
+    )
+    message = models.CharField(max_length=255)
+    details = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["delivery", "created_at"])]
+
+
+class DeliveryBackup(TimeStampedModel):
+    class Status(models.TextChoices):
+        RUNNING = "running", "Running"
+        COMPLETE = "complete", "Complete"
+        FAILED = "failed", "Failed"
+
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.RUNNING)
+    object_key = models.CharField(max_length=900, blank=True)
+    delivery_count = models.PositiveIntegerField(default=0)
+    asset_count = models.PositiveIntegerField(default=0)
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    error_message = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="delivery_backups",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
