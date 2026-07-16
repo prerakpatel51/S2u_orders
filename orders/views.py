@@ -302,6 +302,9 @@ class OrderItemCreateAPIView(APIView):
         stock_value = stock.actual if stock else 0
         need_value = need.needed_quantity if need else 0
         on_shelf = decimal_value(request.data.get("on_shelf_quantity", 0))
+        if on_shelf < 0 or on_shelf != on_shelf.to_integral_value():
+            return Response({"detail": "On-shelf quantity must be a whole, non-negative number."}, status=400)
+        on_shelf = int(on_shelf)
         item, created = OrderListItem.objects.update_or_create(
             order_list=order_list,
             product=product,

@@ -247,7 +247,7 @@ function coreColumns() {
     {field: 'supplier_pack_size', headerName: 'Case / pack', width: 105, minWidth: 90, hide: true, type: 'numericColumn', comparator: gridNumberCompare, valueFormatter: quantityFormat},
     {field: 'supplier_purchase_price', headerName: 'Purchase price', width: 115, minWidth: 100, hide: true, type: 'numericColumn', comparator: gridNumberCompare, valueFormatter: params => Number(params.value || 0).toLocaleString(undefined, {style: 'currency', currency: 'USD'})},
     {field: 'supplier_names', headerName: 'All suppliers', width: 260, minWidth: 180, hide: true, comparator: gridNaturalCompare},
-    {field: 'on_shelf_quantity', headerName: 'Shelf', pinned: 'left', width: 88, minWidth: 78, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 3, showStepperButtons: true}, cellClass: orderPermissions.canEdit ? 'editable-cell stock-input-cell' : 'stock-input-cell', type: 'numericColumn', comparator: gridNumberCompare},
+    {field: 'on_shelf_quantity', headerName: 'Shelf', pinned: 'left', width: 88, minWidth: 78, editable: orderPermissions.canEdit, valueParser: numeric, valueFormatter: quantityFormat, cellEditor: 'agNumberCellEditor', cellEditorParams: {min: 0, step: 1, precision: 0, showStepperButtons: true}, cellClass: orderPermissions.canEdit ? 'editable-cell stock-input-cell' : 'stock-input-cell', type: 'numericColumn', comparator: gridNumberCompare},
   ];
   if (orderPermissions.isAdmin) {
     columns.push(

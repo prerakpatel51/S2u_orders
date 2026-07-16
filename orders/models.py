@@ -151,7 +151,7 @@ class OrderListItem(TimeStampedModel):
     order_list = models.ForeignKey(OrderList, related_name="items", on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     current_stock_snapshot = models.DecimalField(max_digits=12, decimal_places=3, default=0)
-    on_shelf_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    on_shelf_quantity = models.PositiveIntegerField(default=0)
     monthly_needed_snapshot = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     joe_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
     bt_quantity = models.DecimalField(max_digits=12, decimal_places=3, default=0)
