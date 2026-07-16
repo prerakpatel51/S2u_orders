@@ -1,6 +1,6 @@
 (function(){
   const BUILT_INS=[
-    ['50ml','50 ml','Size / pack','50 ml,50ml'],['100ml','100 ml','Size / pack','100 ml,100ml'],['200ml','200 ml','Size / pack','200 ml,200ml'],['375ml','375 ml','Size / pack','375 ml,375ml'],['750ml','750 ml','Size / pack','750 ml,750ml'],['1l','1 L','Size / pack','1 l,1l'],['1.75l','1.75 L','Size / pack','1.75 l,1.75l'],['4pk','4 pack','Size / pack','4pk,4 pack'],['6pk','6 pack','Size / pack','6pk,6 pack'],['8pk','8 pack','Size / pack','8pk,8 pack'],['12pk','12 pack','Size / pack','12pk,12 pack'],['24pk','24 pack','Size / pack','24pk,24 pack'],
+    ['50ml','50 ml','Size / pack','50 ml,50ml'],['100ml','100 ml','Size / pack','100 ml,100ml'],['200ml','200 ml','Size / pack','200 ml,200ml'],['375ml','375 ml','Size / pack','375 ml,375ml'],['750ml','750 ml','Size / pack','750 ml,750ml'],['1l','1 L','Size / pack','1 l,1l'],['1.75l','1.75 L','Size / pack','1.75 l,1.75l'],['12oz','12 oz','Size / pack','12 oz,12oz'],['16oz','16 oz','Size / pack','16 oz,16oz'],['4pk','4 pack','Size / pack','4pk,4 pack'],['6pk','6 pack','Size / pack','6pk,6 pack'],['8pk','8 pack','Size / pack','8pk,8 pack'],['12pk','12 pack','Size / pack','12pk,12 pack'],['24pk','24 pack','Size / pack','24pk,24 pack'],
     ['vodka','Vodka','Liquor type','vodka,flavored vodka'],['whiskey','Whiskey / Bourbon / Rye / Scotch','Liquor type','whiskey,whisky,bourbon,rye whiskey,rye whisky,scotch,single malt,blended whisky,blended whiskey,irish whiskey,canadian whisky,corn whiskey,wheat whiskey,tennessee whiskey'],['tequila','Tequila','Liquor type','tequila,100% agave,blue agave'],['mezcal','Mezcal / Agave spirit','Liquor type','mezcal,agave spirit,espadin,tobala'],['rum','Rum / Rhum / Cachaça','Liquor type','rum,rhum,cachaca,cachaça'],['gin','Gin / Genever','Liquor type','gin,dry gin,london dry,genever,old tom'],['brandy','Brandy / Cognac','Liquor type','brandy,cognac,armagnac,applejack,calvados,pisco,grappa'],['liqueur','Liqueur / Cordial','Liquor type','liqueur,cordial,schnapps,amaretto,triple sec,curacao,curaçao,creme de,crème de'],['other_spirits','Other spirits','Liquor type','moonshine,aquavit,akvavit,ouzo,absinthe,neutral spirits,grain alcohol'],
     ['chardonnay','Chardonnay','Wine / style','chardonnay'],['cabernet','Cabernet Sauvignon','Wine / style','cabernet,cab sauv,cabernet sauvignon'],['merlot','Merlot','Wine / style','merlot'],['moscato','Moscato / Muscat','Wine / style','moscato,muscat'],['pinotnoir','Pinot Noir','Wine / style','pinot noir'],['pinotgrigio','Pinot Grigio / Gris','Wine / style','pinot grigio,pinot gris'],['sauvignonblanc','Sauvignon Blanc','Wine / style','sauvignon blanc,fume blanc,fumé blanc'],['riesling','Riesling','Wine / style','riesling'],['rose','Rosé / Rose','Wine / style','rose,rosé'],['sparkling','Sparkling / Champagne / Prosecco','Wine / style','sparkling,champagne,prosecco,cava'],['zinfandel','Zinfandel','Wine / style','zinfandel,white zin'],['malbec','Malbec','Wine / style','malbec'],['sangria','Sangria','Wine / style','sangria'],
     ['blanco','Blanco / Plata / Silver','Tequila class','blanco,plata,silver'],['joven','Joven / Oro / Gold','Tequila class','joven,oro,gold'],['reposado','Reposado','Tequila class','reposado'],['anejo','Añejo','Tequila class','anejo,añejo'],['extraanejo','Extra Añejo','Tequila class','extra anejo,extra añejo,ultra aged']
@@ -27,5 +27,50 @@
     async updateKeywords(id){const input=[...this.panel.querySelectorAll('[data-keywords]')].find(item=>item.dataset.keywords===id),terms=input?.value.trim();if(!terms)return showToast('Enter at least one matching keyword',true);const custom=this.preference.custom.find(item=>item.id===id);if(custom)custom.terms=terms;else this.preference.overrides[id]=terms;await this.save();showToast('Category keywords saved');}
     async remove(id){this.selected.delete(id);this.preference.custom=this.preference.custom.filter(item=>item.id!==id);if(BUILT_INS.some(([built])=>built===id)&&!this.preference.hidden.includes(id))this.preference.hidden.push(id);await this.save();showToast('Category removed');}
   }
+  const FILTER_OPERATORS=[['contains','Contains'],['notContains','Does not contain'],['equals','Equals'],['notEqual','Does not equal'],['startsWith','Starts with'],['endsWith','Ends with']];
+  class ProductNameCategoryFilter{
+    init(params){
+      this.params=params;this.query='';this.operator='contains';this.selected=new Set();this.preference={hidden:[],custom:[],overrides:{}};
+      this.gui=document.createElement('div');this.gui.className='product-category-filter';this.render();this.load();
+    }
+    async load(){
+      try{this.preference=await apiFetch('/api/product-categories/');}catch(_){this.preference={hidden:[],custom:[],overrides:{}};}
+      this.preference.hidden ||= [];this.preference.custom ||= [];this.preference.overrides ||= {};this.render();
+    }
+    categories(){return [...BUILT_INS.filter(([id])=>!this.preference.hidden.includes(id)).map(([id,label,group,terms])=>({id,label,group,terms:this.preference.overrides[id]||terms,builtIn:true})),...this.preference.custom.map(item=>({...item,builtIn:false}))];}
+    render(){
+      const categories=this.categories(),groups=[...new Set(categories.map(item=>item.group))];
+      this.gui.innerHTML=`<label><span>Product name filter</span><select data-product-filter-operator>${FILTER_OPERATORS.map(([id,label])=>`<option value="${id}" ${this.operator===id?'selected':''}>${label}</option>`).join('')}</select><input type="search" data-product-name-filter autocomplete="off" placeholder="Filter value"></label><fieldset><legend>Categories <small>(select multiple)</small></legend><div class="category-options">${groups.map(group=>`<div class="category-group"><strong>${esc(group)}</strong>${categories.filter(item=>item.group===group).map(item=>`<label class="category-row"><input type="checkbox" value="${esc(item.id)}" data-product-category-filter ${this.selected.has(item.id)?'checked':''}><span>${esc(item.label)}</span><button type="button" class="category-delete" data-category-delete="${esc(item.id)}" title="Remove category">×</button></label>`).join('')}</div>`).join('')}</div></fieldset><button type="button" class="secondary-button category-manage-toggle" data-category-manage>Add category</button><div class="category-manager" data-category-manager hidden><input data-category-label placeholder="Category name"><input data-category-terms placeholder="Matching words, comma separated"><input data-category-group placeholder="Group (optional)"><div class="category-manager-actions"><button type="button" class="primary-button" data-category-save>Add</button><button type="button" class="secondary-button" data-category-cancel>Cancel</button></div></div><button type="button" class="secondary-button" data-product-filter-clear>Clear all</button>`;
+      const nameInput=this.gui.querySelector('[data-product-name-filter]'),operator=this.gui.querySelector('[data-product-filter-operator]');
+      nameInput.value=this.query;
+      nameInput.oninput=()=>{this.query=nameInput.value;this.params.filterChangedCallback();};operator.onchange=()=>{this.operator=operator.value;this.params.filterChangedCallback();};
+      this.gui.querySelectorAll('[data-product-category-filter]').forEach(input=>input.onchange=()=>{input.checked?this.selected.add(input.value):this.selected.delete(input.value);this.params.filterChangedCallback();});
+      const manager=this.gui.querySelector('[data-category-manager]');
+      this.gui.querySelector('[data-category-manage]').onclick=()=>{manager.hidden=false;this.gui.querySelector('[data-category-label]').focus();};
+      this.gui.querySelector('[data-category-cancel]').onclick=()=>{manager.hidden=true;};
+      this.gui.querySelector('[data-category-save]').onclick=()=>this.add();
+      this.gui.querySelectorAll('[data-category-delete]').forEach(button=>button.onclick=event=>{event.preventDefault();event.stopPropagation();this.remove(button.dataset.categoryDelete);});
+      this.gui.querySelector('[data-product-filter-clear]').onclick=()=>{this.query='';this.operator='contains';this.selected.clear();this.render();this.params.filterChangedCallback();};
+    }
+    getGui(){return this.gui;}
+    afterGuiAttached(){this.gui.querySelector('[data-product-name-filter]')?.focus();}
+    isFilterActive(){return Boolean(this.query.trim()||this.selected.size);}
+    doesFilterPass(params){
+      const productName=String(this.params.getValue(params.node)||''),normalizedName=this.normalizeForText(productName),normalizedQuery=this.normalizeForText(this.query.trim());
+      const chosen=this.categories().filter(item=>this.selected.has(item.id)),groups=[...new Set(chosen.map(item=>item.group))];
+      if(!groups.every(group=>chosen.filter(item=>item.group===group).some(item=>item.terms.split(',').map(norm).some(term=>term&&this.matchesTerm(norm(productName),term)))))return false;
+      if(!normalizedQuery)return true;
+      const matches={contains:normalizedName.includes(normalizedQuery),notContains:!normalizedName.includes(normalizedQuery),equals:normalizedName===normalizedQuery,notEqual:normalizedName!==normalizedQuery,startsWith:normalizedName.startsWith(normalizedQuery),endsWith:normalizedName.endsWith(normalizedQuery)};
+      return Boolean(matches[this.operator]);
+    }
+    getModel(){return this.isFilterActive()?{filterType:'productNameCategory',type:this.operator,query:this.query.trim(),categories:[...this.selected]}:null;}
+    setModel(model){this.query=model?.query||'';this.operator=model?.type||'contains';this.selected=new Set(model?.categories||(model?.category?[model.category]:[]));this.render();}
+    normalizeForText(value){return norm(value).replace(/[^a-z0-9]+/g,'');}
+    matchesTerm(text,term){const escaped=term.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`,'i').test(text);}
+    async save(){this.preference=await apiFetch('/api/product-categories/',{method:'PUT',body:JSON.stringify(this.preference)});this.render();this.params.filterChangedCallback();}
+    async add(){const label=this.gui.querySelector('[data-category-label]').value.trim(),terms=this.gui.querySelector('[data-category-terms]').value.trim(),group=this.gui.querySelector('[data-category-group]').value.trim()||'Custom';if(!label||!terms)return showToast('Enter a category name and matching words',true);this.preference.custom.push({id:`custom-${Date.now()}`,label,terms,group});await this.save();showToast('Category added');}
+    async remove(id){this.selected.delete(id);this.preference.custom=this.preference.custom.filter(item=>item.id!==id);if(BUILT_INS.some(([built])=>built===id)&&!this.preference.hidden.includes(id))this.preference.hidden.push(id);await this.save();showToast('Category removed');}
+  }
   window.SearchCategoryFilter=SearchCategoryFilter;
+  window.ProductNameCategoryFilter=ProductNameCategoryFilter;
 })();

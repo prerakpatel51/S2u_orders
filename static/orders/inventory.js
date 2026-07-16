@@ -112,7 +112,7 @@ function buildGrid(payload) {
   }));
   const columnDefs = [
     {field: 'number', headerName: 'Product #', pinned: 'left', width: 115, filter: true, comparator: gridNaturalCompare},
-    {field: 'name', headerName: 'Product name', pinned: 'left', minWidth: 210, width: 280, filter: true, comparator: gridNaturalCompare},
+    {field: 'name', headerName: 'Product name', pinned: 'left', minWidth: 210, width: 280, filter: ProductNameCategoryFilter, comparator: gridNaturalCompare},
     ...storeColumns,
     {colId: 'remove', headerName: '', pinned: 'right', width: 42, minWidth: 42, maxWidth: 42, sortable: false, filter: false, resizable: false, cellRenderer: removeRenderer},
   ];
