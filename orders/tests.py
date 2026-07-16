@@ -7,8 +7,9 @@ from decimal import Decimal
 from io import BytesIO
 from unittest.mock import Mock, patch
 
+from django.contrib import admin
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 from openpyxl import load_workbook
 
@@ -1217,6 +1218,86 @@ class OrderApiTests(TestCase):
             {"stores", "products", "stocks", "stock_reconciliation", "receipts", "monthly_reconciliation"},
         )
 
+    @patch("orders.views.bucket_health_snapshot")
+    def test_operations_reports_primary_and_dr_bucket_health(self, health):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+        health.return_value = {
+            "primary": {
+                "label": "Primary evidence",
+                "bucket": "live-bucket",
+                "configured": True,
+                "status": "healthy",
+                "reachable": True,
+                "latency_ms": 21,
+                "error": "",
+            },
+            "dr": {
+                "label": "Disaster recovery",
+                "bucket": "dr-bucket",
+                "configured": True,
+                "status": "healthy",
+                "reachable": True,
+                "latency_ms": 24,
+                "error": "",
+            },
+            "checked_at": timezone.now(),
+        }
+        delivery = Delivery.objects.create(
+            store=self.store,
+            delivered_at=timezone.now(),
+            submitted_by=self.user,
+        )
+        asset = DeliveryAsset.objects.create(
+            delivery=delivery,
+            category=DeliveryAsset.Category.BOXES,
+            object_key=f"{delivery.storage_prefix}/boxes/proof.jpg",
+            original_filename="proof.jpg",
+            content_type="image/jpeg",
+            size_bytes=2048,
+            upload_status=DeliveryAsset.UploadStatus.UPLOADED,
+            uploaded_by=self.user,
+        )
+        DeliveryAssetReplica.objects.create(
+            asset=asset,
+            object_key=asset.object_key,
+            status=DeliveryAssetReplica.Status.VERIFIED,
+            size_bytes=2048,
+            verified_at=timezone.now(),
+        )
+        DeliveryBackup.objects.create(status=DeliveryBackup.Status.COMPLETE)
+        DeliveryRecoveryExport.objects.create(
+            status=DeliveryRecoveryExport.Status.COMPLETE,
+            scope="all",
+            object_key="exports/test.zip",
+            created_by=self.user,
+        )
+
+        response = self.client.get("/api/operations/services/")
+
+        self.assertEqual(response.status_code, 200)
+        storage = response.json()["delivery_storage"]
+        self.assertTrue(storage["primary"]["reachable"])
+        self.assertTrue(storage["dr"]["reachable"])
+        self.assertEqual(storage["primary_stats"]["tracked_files"], 1)
+        self.assertEqual(storage["dr_stats"]["verified_files"], 1)
+        self.assertEqual(storage["coverage_percent"], 100.0)
+        self.assertEqual(storage["catalogs"]["complete"], 1)
+        self.assertEqual(storage["exports"]["ready"], 1)
+        self.assertEqual(storage["deletion_policy"], "disabled_in_application")
+
+    def test_delivery_evidence_cannot_be_deleted_through_django_admin(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_staff", "is_superuser"])
+        request = RequestFactory().get("/admin/")
+        request.user = self.user
+
+        self.assertFalse(admin.site._registry[Delivery].has_delete_permission(request))
+        self.assertFalse(admin.site._registry[DeliveryAsset].has_delete_permission(request))
+        self.assertFalse(admin.site._registry[DeliveryAssetReplica].has_delete_permission(request))
+
     @patch("orders.tasks.sync_stores_task.delay")
     def test_manual_job_is_marked_queued_and_cannot_be_duplicated(self, delay):
         delay.return_value.id = "queued-task"
@@ -1360,6 +1441,8 @@ class OrderApiTests(TestCase):
         body = response.content.decode()
         for element_id in (
             "ops-attention",
+            "storage-health-badge",
+            "storage-bucket-grid",
             "show-inactive-products",
             "stock-coverage",
             "run-service-filter",

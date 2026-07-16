@@ -64,6 +64,43 @@ class DeliveryAdmin(admin.ModelAdmin):
     )
     readonly_fields = ("uuid", "created_at", "updated_at")
 
+    def has_delete_permission(self, request, obj=None):
+        # Confirmed evidence is intentionally immutable. Bucket removal is a
+        # separate disaster-recovery operation, not a Django Admin action.
+        return False
+
+
+class ImmutableEvidenceAdmin(admin.ModelAdmin):
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_readonly_fields(self, request, obj=None):
+        return tuple(field.name for field in self.model._meta.fields)
+
+
+@admin.register(DeliveryAsset)
+class DeliveryAssetAdmin(ImmutableEvidenceAdmin):
+    list_display = (
+        "uuid",
+        "delivery",
+        "category",
+        "upload_status",
+        "size_bytes",
+        "uploaded_by",
+    )
+    list_filter = ("category", "upload_status")
+    search_fields = ("uuid", "delivery__uuid", "object_key", "original_filename")
+
+
+@admin.register(DeliveryAssetReplica)
+class DeliveryAssetReplicaAdmin(ImmutableEvidenceAdmin):
+    list_display = ("asset", "status", "size_bytes", "verified_at", "attempts")
+    list_filter = ("status",)
+    search_fields = ("asset__uuid", "object_key", "checksum_sha256")
+
 
 admin.site.register(
     [
@@ -82,8 +119,6 @@ admin.site.register(
         SystemSetting,
         SystemLog,
         ApiRequestLog,
-        DeliveryAsset,
-        DeliveryAssetReplica,
         DeliveryBackup,
         DeliveryEvent,
         DeliveryKeyword,

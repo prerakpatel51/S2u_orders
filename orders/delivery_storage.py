@@ -7,12 +7,14 @@ import mimetypes
 import re
 import shutil
 import tempfile
+import time
 import zipfile
 from pathlib import PurePosixPath
 
 import boto3
 from botocore.config import Config
 from django.conf import settings
+from django.core.cache import cache
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.utils import timezone
@@ -78,6 +80,60 @@ def dr_client():
         settings.DELIVERY_DR_BUCKET_ACCESS_KEY_ID,
         settings.DELIVERY_DR_BUCKET_SECRET_ACCESS_KEY,
     )
+
+
+def bucket_health_snapshot():
+    """Return a short-lived connectivity probe for both private evidence buckets."""
+    cached = cache.get("delivery-storage-health-v1")
+    if cached:
+        return cached
+
+    def probe(label, configured, bucket_name, factory):
+        result = {
+            "label": label,
+            "bucket": bucket_name or "Not configured",
+            "configured": bool(configured),
+            "status": "not_configured",
+            "reachable": False,
+            "latency_ms": None,
+            "error": "Storage credentials are not configured." if not configured else "",
+        }
+        if not configured:
+            return result
+        started = time.monotonic()
+        try:
+            factory().list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+            result.update(
+                status="healthy",
+                reachable=True,
+                latency_ms=max(1, round((time.monotonic() - started) * 1000)),
+                error="",
+            )
+        except Exception as exc:
+            result.update(
+                status="unavailable",
+                latency_ms=max(1, round((time.monotonic() - started) * 1000)),
+                error=f"{type(exc).__name__}: bucket probe failed"[:240],
+            )
+        return result
+
+    snapshot = {
+        "primary": probe(
+            "Primary evidence",
+            is_configured(),
+            settings.DELIVERY_BUCKET_NAME,
+            client,
+        ),
+        "dr": probe(
+            "Disaster recovery",
+            dr_is_configured(),
+            settings.DELIVERY_DR_BUCKET_NAME,
+            dr_client,
+        ),
+        "checked_at": timezone.now(),
+    }
+    cache.set("delivery-storage-health-v1", snapshot, 60)
+    return snapshot
 
 
 def safe_filename(filename, content_type=""):

@@ -24,11 +24,16 @@ from .exports import (
     pdf_response,
     xlsx_response,
 )
+from .delivery_storage import bucket_health_snapshot
 from .models import (
     ApiRequestLog,
     BulkOrderItem,
     BulkOrderList,
     BulkOrderQuantity,
+    DeliveryAsset,
+    DeliveryAssetReplica,
+    DeliveryBackup,
+    DeliveryRecoveryExport,
     OrderList,
     OrderListItem,
     Product,
@@ -950,6 +955,63 @@ class ServicesAPIView(APIView):
             )
             .order_by("-requests", "url_path")[:20]
         )
+        storage_health = bucket_health_snapshot()
+        uploaded_assets = DeliveryAsset.objects.filter(
+            upload_status=DeliveryAsset.UploadStatus.UPLOADED
+        )
+        primary_totals = uploaded_assets.aggregate(
+            files=Count("id"),
+            size_bytes=Sum("size_bytes"),
+            last_upload_at=Max("updated_at"),
+        )
+        verified_replicas = DeliveryAssetReplica.objects.filter(
+            status=DeliveryAssetReplica.Status.VERIFIED
+        )
+        dr_totals = verified_replicas.aggregate(
+            files=Count("id"),
+            size_bytes=Sum("size_bytes"),
+            last_verified_at=Max("verified_at"),
+        )
+        failed_replicas = DeliveryAssetReplica.objects.filter(
+            status__in=[
+                DeliveryAssetReplica.Status.FAILED,
+                DeliveryAssetReplica.Status.MISSING,
+            ]
+        ).count()
+        primary_file_count = primary_totals["files"] or 0
+        verified_file_count = dr_totals["files"] or 0
+        backup_totals = DeliveryBackup.objects.filter(
+            status=DeliveryBackup.Status.COMPLETE
+        ).aggregate(complete=Count("id"), latest_at=Max("created_at"))
+        export_totals = DeliveryRecoveryExport.objects.filter(
+            status=DeliveryRecoveryExport.Status.COMPLETE
+        ).aggregate(ready=Count("id"), latest_at=Max("created_at"))
+        storage_health.update(
+            {
+                "coverage_percent": round(
+                    (verified_file_count / primary_file_count) * 100, 1
+                )
+                if primary_file_count
+                else 100.0,
+                "primary_stats": {
+                    "tracked_files": primary_file_count,
+                    "tracked_bytes": primary_totals["size_bytes"] or 0,
+                    "last_upload_at": primary_totals["last_upload_at"],
+                },
+                "dr_stats": {
+                    "verified_files": verified_file_count,
+                    "tracked_bytes": dr_totals["size_bytes"] or 0,
+                    "pending_files": max(
+                        0, primary_file_count - verified_file_count - failed_replicas
+                    ),
+                    "failed_files": failed_replicas,
+                    "last_verified_at": dr_totals["last_verified_at"],
+                },
+                "catalogs": backup_totals,
+                "exports": export_totals,
+                "deletion_policy": "disabled_in_application",
+            }
+        )
         return Response(
             {
                 "can_manage": True,
@@ -1013,6 +1075,7 @@ class ServicesAPIView(APIView):
                     ),
                     "stores": stock_stores,
                 },
+                "delivery_storage": storage_health,
                 "services": [
                     {
                         "name": row.service_name,

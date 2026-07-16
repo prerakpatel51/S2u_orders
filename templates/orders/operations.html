@@ -8,6 +8,12 @@
 <section id="ops-overview" class="ops-overview" aria-label="Job health"></section>
 <section id="ops-attention" class="ops-attention" hidden></section>
 
+<section class="ops-storage-panel">
+  <div class="ops-section-head"><div><p class="eyebrow">Delivery evidence protection</p><h2>Object storage and disaster recovery</h2><p>Live connectivity, integrity-verified replication coverage, catalogs, and export readiness for both private Railway buckets.</p></div><span id="storage-health-badge" class="status">Loading</span></div>
+  <div id="storage-bucket-grid" class="storage-bucket-grid"></div>
+  <div class="storage-policy"><i data-lucide="lock-keyhole"></i><div><strong>Evidence deletion is disabled inside S2U Orders</strong><p>Employees, admins, and superusers cannot delete confirmed delivery images through the application or Django Admin. Only a Railway project owner with direct bucket credentials could remove the underlying objects.</p></div></div>
+</section>
+
 <section class="ops-setting-panel">
   <div><p class="eyebrow">Catalog visibility</p><h2>Inactive products</h2><p>Inactive KORONA records stay available for historical reporting. Choose whether they also appear in search and new-order workflows.</p></div>
   <div class="ops-setting-control"><span id="inactive-product-summary">Loading product counts...</span><label class="switch" title="Show inactive products"><input id="show-inactive-products" type="checkbox"><span></span></label><strong id="inactive-product-state">Hidden</strong></div>
@@ -40,4 +46,4 @@
   <div class="latency-layout"><div><h3>Endpoint health · last 24 hours</h3><div class="table-scroll diagnostic-table"><table class="data-table"><thead><tr><th>Endpoint</th><th>Requests</th><th>Errors</th><th>Average</th><th>Slowest</th></tr></thead><tbody id="endpoint-health-list"></tbody></table></div></div><details><summary>Latest individual requests</summary><div class="table-scroll diagnostic-table"><table class="data-table"><thead><tr><th>Endpoint</th><th>Status</th><th>Latency</th><th>Time</th></tr></thead><tbody id="latency-list"></tbody></table></div></details></div>
 </section>
 {% endblock %}
-{% block scripts %}<script src="{% static 'orders/operations.js' %}?v=20260715e"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'orders/operations.js' %}?v=20260716a"></script>{% endblock %}

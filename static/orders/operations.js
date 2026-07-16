@@ -29,6 +29,13 @@ const duration = milliseconds => {
 };
 const intervalLabel = seconds => seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} sec`;
 const ageLabel = seconds => seconds === null || seconds === undefined ? 'Never' : seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+const storageBytes = value => {
+  const bytes = Number(value || 0);
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+};
 
 function metricsFor(serviceName, run, limit = 6) {
   if (!run) return [];
@@ -63,6 +70,23 @@ function renderOverview(data) {
   const attention = document.getElementById('ops-attention');
   attention.hidden = !overview.attention.length;
   attention.innerHTML = overview.attention.length ? `<div><i data-lucide="triangle-alert"></i><div><strong>${overview.attention.length} job${overview.attention.length === 1 ? '' : 's'} need attention</strong><p>${overview.attention.map(item => `${escapeOps(serviceLabels[item.name] || item.name)}: ${escapeOps(item.message)}`).join('<br>')}</p></div></div><div>${overview.attention.map(item => `<button class="secondary-button" data-focus-service="${item.name}">View ${escapeOps(serviceLabels[item.name] || item.name)}</button>`).join('')}</div>` : '';
+}
+
+function renderDeliveryStorage(data) {
+  const storage = data.delivery_storage;
+  const primary = storage.primary;
+  const dr = storage.dr;
+  const primaryStats = storage.primary_stats;
+  const drStats = storage.dr_stats;
+  const healthy = primary.reachable && dr.reachable && drStats.failed_files === 0 && drStats.pending_files === 0;
+  const badge = document.getElementById('storage-health-badge');
+  badge.className = `status ${healthy ? 'success' : primary.reachable || dr.reachable ? 'warning' : 'error'}`;
+  badge.textContent = healthy ? 'Protected' : 'Needs attention';
+  const bucketCard = (bucket, stats, icon, detail) => `<article class="storage-bucket-card ${bucket.reachable ? 'healthy' : 'unavailable'}"><div class="storage-bucket-head"><span><i data-lucide="${icon}"></i></span><div><small>${escapeOps(bucket.label)}</small><strong>${escapeOps(bucket.bucket)}</strong></div><span class="status ${bucket.reachable ? 'success' : 'error'}">${bucket.reachable ? 'Reachable' : escapeOps(bucket.status.replaceAll('_', ' '))}</span></div><div class="storage-bucket-metrics">${stats}</div><footer><span><i data-lucide="activity"></i>${bucket.latency_ms ? `${bucket.latency_ms}ms live probe` : 'No live probe'}</span><span>${detail}</span></footer>${bucket.error && !bucket.reachable ? `<p class="storage-probe-error">${escapeOps(bucket.error)}</p>` : ''}</article>`;
+  const primaryMetrics = `<div><small>Tracked evidence</small><strong>${primaryStats.tracked_files.toLocaleString()}</strong></div><div><small>Stored size</small><strong>${storageBytes(primaryStats.tracked_bytes)}</strong></div><div><small>Latest upload</small><strong>${dateTime(primaryStats.last_upload_at)}</strong></div>`;
+  const drMetrics = `<div><small>Integrity verified</small><strong>${drStats.verified_files.toLocaleString()}</strong></div><div><small>Protection</small><strong>${storage.coverage_percent}%</strong></div><div class="${drStats.pending_files || drStats.failed_files ? 'metric-warning' : ''}"><small>Pending / failed</small><strong>${drStats.pending_files} / ${drStats.failed_files}</strong></div>`;
+  const recoveryMetrics = `<div><small>DR catalogs</small><strong>${storage.catalogs.complete.toLocaleString()}</strong></div><div><small>Ready ZIPs</small><strong>${storage.exports.ready.toLocaleString()}</strong></div><div><small>Latest catalog</small><strong>${dateTime(storage.catalogs.latest_at)}</strong></div>`;
+  document.getElementById('storage-bucket-grid').innerHTML = `${bucketCard(primary, primaryMetrics, 'database', 'Normal delivery viewing')}${bucketCard(dr, drMetrics, 'shield-check', `Last verified ${dateTime(drStats.last_verified_at)}`)}<article class="storage-bucket-card recovery-assets"><div class="storage-bucket-head"><span><i data-lucide="archive-restore"></i></span><div><small>Recovery assets</small><strong>Catalogs and portable ZIPs</strong></div><span class="status success">Ready</span></div><div class="storage-bucket-metrics">${recoveryMetrics}</div><footer><span><i data-lucide="folder-tree"></i>Exact dated paths retained</span><span>ZIPs expire automatically</span></footer></article>`;
 }
 
 function renderServices(data) {
@@ -186,7 +210,7 @@ async function loadOperations() {
     operationsData = data;
     document.getElementById('ops-counts').innerHTML = Object.entries(data.counts).map(([name, value]) => `<div><span>${escapeOps(countLabels[name] || name.replaceAll('_', ' '))}</span><strong>${Number(value).toLocaleString()}</strong></div>`).join('');
     document.getElementById('ops-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
-    renderOverview(data); renderProductVisibility(data); renderStockSync(data); renderServices(data); renderDiagnostics();
+    renderOverview(data); renderDeliveryStorage(data); renderProductVisibility(data); renderStockSync(data); renderServices(data); renderDiagnostics();
     lucide.createIcons();
     clearTimeout(operationsTimer);
     const active = data.services.some(service => ['queued', 'running'].includes(service.status));
