@@ -6,10 +6,11 @@ let delivery;
 let keywords = [];
 let proofGroups = {invoice: [], boxes: [], damage: []};
 let selectedPhoto = {invoice: 0, boxes: 0, damage: 0};
-let lightboxPhotos = [];
-let lightboxIndex = 0;
-let lightboxZoom = 1;
-let pointerStart = null;
+const detailComparePanes = {
+  invoice: {category: 'invoice', assets: [], index: 0, zoom: 1, pointer: null},
+  evidence: {category: 'boxes', assets: [], index: 0, zoom: 1, pointer: null},
+};
+let activeDetailComparePane = 'invoice';
 
 function countLabel(count, word = 'photo') { return `${count} ${word}${count === 1 ? '' : 's'}`; }
 function categoryLabel(category) { return {invoice: 'Invoice / bill', boxes: 'Cases received', damage: 'Damage evidence'}[category] || category; }
@@ -43,10 +44,9 @@ function render() {
     damage: delivery.assets.filter(item => item.category === 'damage' && item.status === 'uploaded'),
   };
   Object.keys(proofGroups).forEach(clampSelected);
-  lightboxPhotos = [...proofGroups.invoice, ...proofGroups.boxes, ...proofGroups.damage];
   document.getElementById('detail-store').textContent = `${delivery.store.number} — ${delivery.store.name}`;
   document.getElementById('detail-subline').textContent = `${formatDate(delivery.delivered_at)} · Submitted by ${delivery.submitted_by}${delivery.reference_number ? ` · Invoice ${delivery.reference_number}` : ''}`;
-  document.getElementById('detail-head-actions').innerHTML = `${statusBadge(delivery)}${delivery.download_url ? `<a class="secondary-button" href="${delivery.download_url}"><i data-lucide="download"></i>Download proof</a>` : ''}`;
+  document.getElementById('detail-head-actions').innerHTML = `${statusBadge(delivery)}<button id="compare-proof-button" class="secondary-button" type="button"><i data-lucide="columns-2"></i>Compare proof</button>${delivery.download_url ? `<a class="secondary-button" href="${delivery.download_url}"><i data-lucide="download"></i>Download proof</a>` : ''}`;
   const alert = document.getElementById('detail-alert');
   if (delivery.has_issue) { alert.hidden = false; alert.innerHTML = `<i data-lucide="triangle-alert"></i><div><strong>Exception evidence attached</strong><p>${escape(delivery.issue_notes || 'Damage photos or a case-count difference were recorded. Review before verifying.')}</p></div>`; }
   else alert.hidden = true;
@@ -58,6 +58,7 @@ function render() {
   document.getElementById('worker-notes').innerHTML = `<div><span>Delivery notes</span><p>${escape(delivery.general_notes || 'No general notes')}</p></div><div class="${delivery.issue_notes ? 'issue' : ''}"><span>Issue notes</span><p>${escape(delivery.issue_notes || 'No issue notes')}</p></div>`;
   document.getElementById('delivery-timeline').innerHTML = delivery.events.length ? delivery.events.map(event => `<div><span class="timeline-dot"></span><p><strong>${escape(event.message)}</strong><small>${escape(event.actor || 'System')} · ${formatDate(event.created_at)}</small></p></div>`).join('') : '<p>No activity recorded.</p>';
   if (isAdmin) { document.getElementById('review-decision').value = ['submitted', 'draft'].includes(delivery.status) ? 'under_review' : delivery.status; document.getElementById('admin-notes').value = delivery.admin_notes || ''; keywords = [...delivery.keywords]; renderKeywords(); }
+  document.getElementById('compare-proof-button').addEventListener('click', () => openLightbox(proofGroups.invoice[0]?.uuid || proofGroups.boxes[0]?.uuid || proofGroups.damage[0]?.uuid));
   lucide.createIcons();
 }
 
@@ -75,86 +76,70 @@ if (isAdmin) {
 }
 
 const lightbox = document.getElementById('proof-lightbox');
-const lightboxImage = document.getElementById('detail-gallery-image');
-const lightboxScroll = document.getElementById('detail-gallery-scroll');
-const zoomReset = document.getElementById('detail-zoom-reset');
-function setLightboxZoom(nextZoom, keepPosition = false) {
-  lightboxZoom = Math.max(1, Math.min(5, Math.round(nextZoom * 2) / 2));
-  lightboxImage.style.transform = `scale(${lightboxZoom})`;
-  zoomReset.textContent = `${Math.round(lightboxZoom * 100)}%`;
-  lightboxScroll.classList.toggle('zoomed', lightboxZoom > 1);
-  document.getElementById('detail-zoom-out').disabled = lightboxZoom === 1;
-  document.getElementById('detail-zoom-in').disabled = lightboxZoom === 5;
-  if (!keepPosition) requestAnimationFrame(() => {
-    lightboxScroll.scrollLeft = (lightboxScroll.scrollWidth - lightboxScroll.clientWidth) / 2;
-    lightboxScroll.scrollTop = (lightboxScroll.scrollHeight - lightboxScroll.clientHeight) / 2;
-  });
-}
-function lightboxThumbnailMarkup() {
-  return lightboxPhotos.map((asset, index) => `<button type="button" data-detail-gallery-index="${index}" class="${index === lightboxIndex ? 'active' : ''}" aria-label="Show ${escape(categoryLabel(asset.category))} photo ${index + 1}"><img src="${asset.view_url}" loading="lazy" alt=""><span>${escape(categoryLabel(asset.category))}</span></button>`).join('');
-}
-function showLightboxPhoto() {
-  const asset = lightboxPhotos[lightboxIndex];
-  if (!asset) return;
-  setLightboxZoom(1);
-  lightboxImage.src = asset.view_url;
-  lightboxImage.alt = `${categoryLabel(asset.category)} — ${asset.filename}`;
-  document.getElementById('detail-gallery-category').textContent = categoryLabel(asset.category).toUpperCase();
-  document.getElementById('detail-gallery-title').textContent = asset.filename;
-  document.getElementById('detail-gallery-caption').textContent = `${categoryLabel(asset.category)} · ${lightboxIndex + 1} of ${lightboxPhotos.length} · ${formatBytes(asset.size_bytes)}${isAdmin ? ` · ${asset.replica_status === 'verified' ? 'DR protected' : 'DR syncing'}` : ''}`;
-  document.getElementById('detail-gallery-original').href = asset.view_url;
-  document.getElementById('detail-gallery-thumbnails').innerHTML = lightboxThumbnailMarkup();
-  document.querySelectorAll('[data-detail-gallery-index]').forEach(button => button.addEventListener('click', () => { lightboxIndex = Number(button.dataset.detailGalleryIndex); showLightboxPhoto(); }));
-}
 function openLightbox(uuid) {
-  lightboxIndex = Math.max(0, lightboxPhotos.findIndex(item => item.uuid === uuid));
-  showLightboxPhoto();
-  lightbox.showModal();
+  const target = Object.values(proofGroups).flat().find(item => item.uuid === uuid);
+  const evidenceCategory = target?.category === 'damage' ? 'damage' : 'boxes';
+  detailComparePanes.invoice.assets = proofGroups.invoice;
+  detailComparePanes.invoice.index = target?.category === 'invoice' ? Math.max(0, proofGroups.invoice.findIndex(item => item.uuid === uuid)) : selectedPhoto.invoice;
+  detailComparePanes.invoice.zoom = 1;
+  detailComparePanes.evidence.category = evidenceCategory;
+  detailComparePanes.evidence.assets = proofGroups[evidenceCategory];
+  detailComparePanes.evidence.index = target?.category === evidenceCategory ? Math.max(0, proofGroups[evidenceCategory].findIndex(item => item.uuid === uuid)) : selectedPhoto[evidenceCategory];
+  detailComparePanes.evidence.zoom = 1;
+  activeDetailComparePane = target?.category === 'invoice' ? 'invoice' : 'evidence';
+  document.getElementById('detail-compare-title').textContent = evidenceCategory === 'damage' ? 'Invoice and damage evidence' : 'Invoice and received cases';
+  renderDetailComparePane('invoice', true); renderDetailComparePane('evidence', true); lightbox.showModal();
 }
-function moveLightbox(amount) {
-  if (!lightboxPhotos.length) return;
-  lightboxIndex = (lightboxIndex + amount + lightboxPhotos.length) % lightboxPhotos.length;
-  showLightboxPhoto();
+function detailPaneElement(name) { return lightbox.querySelector(`[data-detail-compare-pane="${name}"]`); }
+function centerDetailPane(name) { const scroll = detailPaneElement(name).querySelector('[data-compare-scroll]'); scroll.scrollLeft = (scroll.scrollWidth - scroll.clientWidth) / 2; scroll.scrollTop = (scroll.scrollHeight - scroll.clientHeight) / 2; }
+function updateDetailZoom(name, nextZoom, resetPosition = false) {
+  const state = detailComparePanes[name], pane = detailPaneElement(name), scroll = pane.querySelector('[data-compare-scroll]');
+  const oldMaxX = Math.max(1, scroll.scrollWidth - scroll.clientWidth), oldMaxY = Math.max(1, scroll.scrollHeight - scroll.clientHeight), xRatio = scroll.scrollLeft / oldMaxX, yRatio = scroll.scrollTop / oldMaxY;
+  state.zoom = Math.max(1, Math.min(5, Math.round(nextZoom * 2) / 2));
+  pane.querySelector('[data-compare-image]').style.transform = `scale(${state.zoom})`;
+  pane.querySelector('[data-compare-zoom-reset]').textContent = `${Math.round(state.zoom * 100)}%`;
+  pane.querySelector('[data-compare-zoom-out]').disabled = state.zoom === 1;
+  pane.querySelector('[data-compare-zoom-in]').disabled = state.zoom === 5;
+  scroll.classList.toggle('zoomed', state.zoom > 1);
+  requestAnimationFrame(() => { if (resetPosition) centerDetailPane(name); else { scroll.scrollLeft = xRatio * Math.max(0, scroll.scrollWidth - scroll.clientWidth); scroll.scrollTop = yRatio * Math.max(0, scroll.scrollHeight - scroll.clientHeight); } });
 }
+function renderDetailComparePane(name, resetPosition = false) {
+  const state = detailComparePanes[name], pane = detailPaneElement(name), asset = state.assets[state.index], image = pane.querySelector('[data-compare-image]'), empty = pane.querySelector('[data-compare-empty]'), original = pane.querySelector('[data-compare-original]');
+  if (name === 'evidence') pane.querySelector('[data-compare-side-label]').textContent = state.category === 'damage' ? 'RIGHT · DAMAGE EVIDENCE' : 'RIGHT · RECEIVED CASES';
+  pane.classList.toggle('active', activeDetailComparePane === name); image.hidden = !asset; empty.hidden = Boolean(asset); original.hidden = !asset;
+  pane.querySelector('[data-compare-filename]').textContent = asset?.filename || (name === 'invoice' ? 'No invoice photos' : state.category === 'damage' ? 'No damage photos' : 'No box photos');
+  pane.querySelector('[data-compare-position]').textContent = asset ? `${state.index + 1} / ${state.assets.length}` : '0 / 0';
+  pane.querySelector('[data-compare-previous]').disabled = state.assets.length < 2; pane.querySelector('[data-compare-next]').disabled = state.assets.length < 2;
+  pane.querySelector('[data-compare-caption]').textContent = asset ? `${formatBytes(asset.size_bytes)}${isAdmin ? ` · ${asset.replica_status === 'verified' ? 'DR protected' : 'DR syncing'}` : ''}` : '';
+  pane.querySelector('[data-compare-thumbnails]').innerHTML = state.assets.map((item, index) => `<button type="button" data-compare-index="${index}" class="${index === state.index ? 'active' : ''}" aria-label="Show ${escape(categoryLabel(state.category))} photo ${index + 1}"><img src="${item.view_url}" alt=""><span>${index + 1}</span></button>`).join('');
+  if (asset) { original.href = asset.view_url; image.alt = `${categoryLabel(state.category)} — ${asset.filename}`; if (image.src !== asset.view_url) { image.onload = () => centerDetailPane(name); image.src = asset.view_url; } }
+  updateDetailZoom(name, state.zoom, resetPosition); pane.querySelector('[data-compare-zoom-reset]').disabled = !asset;
+  if (!asset) { pane.querySelector('[data-compare-zoom-out]').disabled = true; pane.querySelector('[data-compare-zoom-in]').disabled = true; }
+}
+function selectDetailPhoto(name, index) { detailComparePanes[name].index = index; detailComparePanes[name].zoom = 1; activeDetailComparePane = name; lightbox.querySelectorAll('[data-detail-compare-pane]').forEach(pane => pane.classList.toggle('active', pane.dataset.detailComparePane === name)); renderDetailComparePane(name, true); }
+function moveDetailPhoto(name, amount) { const state = detailComparePanes[name]; if (state.assets.length) selectDetailPhoto(name, (state.index + amount + state.assets.length) % state.assets.length); }
 document.getElementById('detail-lightbox-close').addEventListener('click', () => lightbox.close());
-document.getElementById('detail-gallery-previous').addEventListener('click', () => moveLightbox(-1));
-document.getElementById('detail-gallery-next').addEventListener('click', () => moveLightbox(1));
-document.getElementById('detail-zoom-out').addEventListener('click', () => setLightboxZoom(lightboxZoom - .5));
-document.getElementById('detail-zoom-in').addEventListener('click', () => setLightboxZoom(lightboxZoom + .5));
-zoomReset.addEventListener('click', () => setLightboxZoom(1));
-lightboxImage.addEventListener('dblclick', () => setLightboxZoom(lightboxZoom === 1 ? 2 : 1));
-lightboxScroll.addEventListener('wheel', event => {
-  if (!(event.ctrlKey || event.metaKey)) return;
-  event.preventDefault();
-  setLightboxZoom(lightboxZoom + (event.deltaY < 0 ? .5 : -.5), true);
-}, {passive: false});
-lightboxScroll.addEventListener('pointerdown', event => {
-  pointerStart = {x: event.clientX, y: event.clientY, scrollLeft: lightboxScroll.scrollLeft, scrollTop: lightboxScroll.scrollTop};
-  lightboxScroll.setPointerCapture(event.pointerId);
-  lightboxScroll.classList.add('dragging');
+lightbox.querySelectorAll('[data-detail-compare-pane]').forEach(pane => {
+  const name = pane.dataset.detailComparePane, state = detailComparePanes[name], scroll = pane.querySelector('[data-compare-scroll]'), image = pane.querySelector('[data-compare-image]');
+  pane.addEventListener('pointerdown', () => { activeDetailComparePane = name; lightbox.querySelectorAll('[data-detail-compare-pane]').forEach(item => item.classList.toggle('active', item === pane)); });
+  pane.querySelector('[data-compare-previous]').addEventListener('click', () => moveDetailPhoto(name, -1)); pane.querySelector('[data-compare-next]').addEventListener('click', () => moveDetailPhoto(name, 1));
+  pane.querySelector('[data-compare-zoom-out]').addEventListener('click', () => updateDetailZoom(name, state.zoom - .5)); pane.querySelector('[data-compare-zoom-in]').addEventListener('click', () => updateDetailZoom(name, state.zoom + .5)); pane.querySelector('[data-compare-zoom-reset]').addEventListener('click', () => updateDetailZoom(name, 1, true));
+  pane.querySelector('[data-compare-thumbnails]').addEventListener('click', event => { const button = event.target.closest('[data-compare-index]'); if (button) selectDetailPhoto(name, Number(button.dataset.compareIndex)); });
+  image.addEventListener('dblclick', () => updateDetailZoom(name, state.zoom === 1 ? 2 : 1, true));
+  scroll.addEventListener('wheel', event => { if (!(event.ctrlKey || event.metaKey)) return; event.preventDefault(); updateDetailZoom(name, state.zoom + (event.deltaY < 0 ? .5 : -.5)); }, {passive: false});
+  scroll.addEventListener('pointerdown', event => { if (state.zoom === 1) return; state.pointer = {x: event.clientX, y: event.clientY, left: scroll.scrollLeft, top: scroll.scrollTop}; scroll.setPointerCapture(event.pointerId); scroll.classList.add('dragging'); event.preventDefault(); });
+  scroll.addEventListener('pointermove', event => { if (state.pointer) { scroll.scrollLeft = state.pointer.left - (event.clientX - state.pointer.x); scroll.scrollTop = state.pointer.top - (event.clientY - state.pointer.y); } });
+  const finish = () => { state.pointer = null; scroll.classList.remove('dragging'); }; scroll.addEventListener('pointerup', finish); scroll.addEventListener('pointercancel', finish);
 });
-lightboxScroll.addEventListener('pointermove', event => {
-  if (!pointerStart || lightboxZoom === 1) return;
-  lightboxScroll.scrollLeft = pointerStart.scrollLeft - (event.clientX - pointerStart.x);
-  lightboxScroll.scrollTop = pointerStart.scrollTop - (event.clientY - pointerStart.y);
-});
-function finishPointer(event) {
-  if (!pointerStart) return;
-  const deltaX = event.clientX - pointerStart.x;
-  if (lightboxZoom === 1 && Math.abs(deltaX) > 60) moveLightbox(deltaX < 0 ? 1 : -1);
-  pointerStart = null;
-  lightboxScroll.classList.remove('dragging');
-}
-lightboxScroll.addEventListener('pointerup', finishPointer);
-lightboxScroll.addEventListener('pointercancel', finishPointer);
 lightbox.addEventListener('click', event => { if (event.target === lightbox) lightbox.close(); });
 document.addEventListener('keydown', event => {
   if (!lightbox.open) return;
-  if (event.key === 'ArrowLeft') moveLightbox(-1);
-  if (event.key === 'ArrowRight') moveLightbox(1);
-  if (event.key === '+' || event.key === '=') setLightboxZoom(lightboxZoom + .5);
-  if (event.key === '-') setLightboxZoom(lightboxZoom - .5);
-  if (event.key === '0') setLightboxZoom(1);
+  const state = detailComparePanes[activeDetailComparePane];
+  if (event.key === 'ArrowLeft') moveDetailPhoto(activeDetailComparePane, -1);
+  if (event.key === 'ArrowRight') moveDetailPhoto(activeDetailComparePane, 1);
+  if (event.key === '+' || event.key === '=') updateDetailZoom(activeDetailComparePane, state.zoom + .5);
+  if (event.key === '-') updateDetailZoom(activeDetailComparePane, state.zoom - .5);
+  if (event.key === '0') updateDetailZoom(activeDetailComparePane, 1, true);
 });
 
 async function load() { try { delivery = await apiFetch(`/api/deliveries/${deliveryId}/`); render(); } catch (error) { root.innerHTML = `<div class="delivery-form-error">${escape(error.message)}</div>`; } }

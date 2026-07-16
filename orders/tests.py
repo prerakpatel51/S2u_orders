@@ -1647,17 +1647,17 @@ class DeliveryProofTests(TestCase):
     @override_settings(
         STORAGES={"staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}}
     )
-    def test_delivery_detail_includes_zoomable_proof_inspector(self):
+    def test_delivery_detail_includes_side_by_side_proof_inspector(self):
         delivery = self.create_delivery()
 
         response = self.client.get(f"/deliveries/{delivery.uuid}/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'id="detail-zoom-out"')
-        self.assertContains(response, 'id="detail-zoom-reset"')
-        self.assertContains(response, 'id="detail-zoom-in"')
-        self.assertContains(response, 'id="detail-gallery-thumbnails"')
-        self.assertContains(response, "delivery_detail.js?v=20260716c")
+        self.assertContains(response, 'data-detail-compare-pane="invoice"')
+        self.assertContains(response, 'data-detail-compare-pane="evidence"')
+        self.assertContains(response, 'data-compare-zoom-in')
+        self.assertContains(response, 'class="verification-sidebar compact-audit-sidebar"')
+        self.assertContains(response, "delivery_detail.js?v=20260716d")
 
     @override_settings(
         STORAGES={"staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}}

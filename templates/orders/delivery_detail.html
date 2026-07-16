@@ -5,37 +5,34 @@
 <div id="delivery-detail" data-delivery-id="{{ delivery.uuid }}" data-is-admin="{{ delivery_admin|yesno:'true,false' }}">
   <section class="delivery-detail-head"><a href="{% if delivery_admin %}{% url 'delivery-review' %}{% else %}{% url 'deliveries' %}{% endif %}" class="delivery-back"><i data-lucide="arrow-left"></i>{% if delivery_admin %}Verification queue{% else %}Your deliveries{% endif %}</a><div class="delivery-detail-title"><div><p class="eyebrow">Delivery proof</p><h1 id="detail-store">Loading…</h1><p id="detail-subline"></p></div><div id="detail-head-actions"></div></div></section>
   <section id="detail-alert" class="detail-alert" hidden></section>
-  <div class="verification-layout">
+  <div class="verification-layout audit-record-layout">
     <main class="verification-proof">
       <div class="proof-column"><div class="proof-column-head"><div><span class="proof-step">A</span><div><h2>Invoice / bill</h2><p>Verify products and quantities on every page.</p></div></div><span id="invoice-count" class="proof-count"></span></div><div id="invoice-gallery" class="proof-gallery"></div></div>
       <div class="proof-column"><div class="proof-column-head"><div><span class="proof-step">B</span><div><h2>Cases received</h2><p>Compare labels, counts, and visible condition.</p></div></div><span id="boxes-count" class="proof-count"></span></div><div id="boxes-gallery" class="proof-gallery"></div><div id="damage-section" class="damage-proof-section" hidden><div class="damage-proof-head"><i data-lucide="triangle-alert"></i><div><h3>Damage / shortage evidence</h3><p>Review these before closing the delivery.</p></div></div><div id="damage-gallery" class="proof-gallery compact"></div></div></div>
     </main>
-    <aside class="verification-sidebar">
+    <aside class="verification-sidebar compact-audit-sidebar">
       <section class="verify-card" id="delivery-facts"></section>
-      <section class="verify-card"><div class="verify-card-title"><i data-lucide="notebook-pen"></i><h2>Delivery notes</h2></div><div id="worker-notes" class="worker-notes"></div></section>
-      {% if delivery_admin %}<section class="verify-card review-action-card"><div class="verify-card-title"><i data-lucide="badge-check"></i><h2>Admin decision</h2></div><label>Status<select id="review-decision"><option value="under_review">Under review</option><option value="needs_info">Needs more information</option><option value="issue_found">Issue found</option><option value="verified">Verified</option><option value="resolved">Resolved</option></select></label><label>Admin notes<textarea id="admin-notes" rows="5" placeholder="Document what was checked, discrepancies, or resolution."></textarea></label><button id="save-review" class="primary-button"><i data-lucide="check"></i>Save verification</button></section>
-      <section class="verify-card"><div class="verify-card-title"><i data-lucide="tags"></i><h2>Search keywords</h2></div><p class="verify-help">Add memorable words such as “holiday”, “shortage”, supplier name, or claim number.</p><div id="keyword-chips" class="keyword-chips"></div><div class="keyword-entry"><input id="keyword-input" maxlength="64" placeholder="Type a keyword"><button id="add-keyword" class="secondary-button">Add</button></div><button id="save-keywords" class="text-button">Save keywords</button></section>{% endif %}
-      <section class="verify-card"><div class="verify-card-title"><i data-lucide="history"></i><h2>Activity</h2></div><div id="delivery-timeline" class="delivery-timeline"></div></section>
+      <details class="verify-card compact-detail-card"><summary><span><i data-lucide="notebook-pen"></i>Delivery notes</span><i data-lucide="chevron-down"></i></summary><div id="worker-notes" class="worker-notes"></div></details>
+      {% if delivery_admin %}<section class="verify-card review-action-card compact-review-action"><div class="verify-card-title"><i data-lucide="badge-check"></i><h2>Save verification</h2></div><div class="compact-review-fields"><label>Status<select id="review-decision"><option value="under_review">Under review</option><option value="needs_info">Needs more information</option><option value="issue_found">Issue found</option><option value="verified">Verified</option><option value="resolved">Resolved</option></select></label><label>Admin notes<textarea id="admin-notes" rows="3" placeholder="What was checked or resolved?"></textarea></label></div><button id="save-review" class="primary-button"><i data-lucide="check"></i>Save verification</button></section>
+      <details class="verify-card compact-detail-card"><summary><span><i data-lucide="tags"></i>Search keywords</span><i data-lucide="chevron-down"></i></summary><p class="verify-help">Add memorable words for future searches.</p><div id="keyword-chips" class="keyword-chips"></div><div class="keyword-entry"><input id="keyword-input" maxlength="64" placeholder="Type a keyword"><button id="add-keyword" class="secondary-button">Add</button></div><button id="save-keywords" class="text-button">Save keywords</button></details>{% endif %}
+      <details class="verify-card compact-detail-card"><summary><span><i data-lucide="history"></i>Activity</span><i data-lucide="chevron-down"></i></summary><div id="delivery-timeline" class="delivery-timeline"></div></details>
     </aside>
   </div>
 </div>
-<dialog id="proof-lightbox" class="review-gallery-dialog detail-gallery-dialog">
-  <header>
-    <div><span id="detail-gallery-category">DELIVERY PROOF</span><strong id="detail-gallery-title">Photo inspector</strong></div>
-    <div class="gallery-tools">
-      <button id="detail-zoom-out" type="button" aria-label="Zoom out" title="Zoom out"><i data-lucide="zoom-out"></i></button>
-      <button id="detail-zoom-reset" type="button" aria-label="Reset zoom" title="Reset zoom">100%</button>
-      <button id="detail-zoom-in" type="button" aria-label="Zoom in" title="Zoom in"><i data-lucide="zoom-in"></i></button>
-      <a id="detail-gallery-original" href="#" target="_blank" rel="noopener" title="Open the original image"><i data-lucide="external-link"></i><span>Original</span></a>
-      <button id="detail-lightbox-close" type="button" aria-label="Close photo inspector" title="Close"><i data-lucide="x"></i></button>
-    </div>
-  </header>
-  <div class="review-gallery-stage detail-gallery-stage">
-    <button id="detail-gallery-previous" class="gallery-nav previous" type="button" aria-label="Previous photo"><i data-lucide="chevron-left"></i></button>
-    <div id="detail-gallery-scroll" class="gallery-image-scroll detail-gallery-scroll"><img id="detail-gallery-image" alt="Delivery proof enlarged" draggable="false"></div>
-    <button id="detail-gallery-next" class="gallery-nav next" type="button" aria-label="Next photo"><i data-lucide="chevron-right"></i></button>
+<dialog id="proof-lightbox" class="review-gallery-dialog compare-gallery-dialog detail-compare-dialog">
+  <header><div><span>AUDIT RECORD COMPARISON</span><strong id="detail-compare-title">Invoice and received cases</strong></div><div class="compare-gallery-hint"><i data-lucide="move"></i>Zoom each side, then drag to inspect</div><button id="detail-lightbox-close" class="compare-gallery-close" type="button" title="Close comparison" aria-label="Close comparison"><i data-lucide="x"></i></button></header>
+  <div class="compare-gallery-stage">
+    <section class="compare-gallery-pane" data-detail-compare-pane="invoice">
+      <header><div><span>LEFT · INVOICE</span><strong data-compare-filename>Invoice / bill</strong></div><div class="compare-pane-tools"><button type="button" data-compare-previous aria-label="Previous invoice"><i data-lucide="chevron-left"></i></button><span data-compare-position>0 / 0</span><button type="button" data-compare-next aria-label="Next invoice"><i data-lucide="chevron-right"></i></button><button type="button" data-compare-zoom-out aria-label="Zoom invoice out"><i data-lucide="zoom-out"></i></button><button type="button" data-compare-zoom-reset>100%</button><button type="button" data-compare-zoom-in aria-label="Zoom invoice in"><i data-lucide="zoom-in"></i></button><a data-compare-original target="_blank" rel="noopener"><i data-lucide="external-link"></i><span>Original</span></a></div></header>
+      <div class="compare-image-scroll" data-compare-scroll><img data-compare-image alt="Full-quality invoice" draggable="false"><div class="compare-pane-empty" data-compare-empty><i data-lucide="image-off"></i><span>No invoice photos</span></div></div>
+      <footer><div data-compare-caption></div><div class="compare-thumbnail-rail" data-compare-thumbnails></div></footer>
+    </section>
+    <section class="compare-gallery-pane" data-detail-compare-pane="evidence">
+      <header><div><span data-compare-side-label>RIGHT · RECEIVED CASES</span><strong data-compare-filename>Boxes / cases</strong></div><div class="compare-pane-tools"><button type="button" data-compare-previous aria-label="Previous received-cases photo"><i data-lucide="chevron-left"></i></button><span data-compare-position>0 / 0</span><button type="button" data-compare-next aria-label="Next received-cases photo"><i data-lucide="chevron-right"></i></button><button type="button" data-compare-zoom-out aria-label="Zoom received-cases photo out"><i data-lucide="zoom-out"></i></button><button type="button" data-compare-zoom-reset>100%</button><button type="button" data-compare-zoom-in aria-label="Zoom received-cases photo in"><i data-lucide="zoom-in"></i></button><a data-compare-original target="_blank" rel="noopener"><i data-lucide="external-link"></i><span>Original</span></a></div></header>
+      <div class="compare-image-scroll" data-compare-scroll><img data-compare-image alt="Full-quality received cases" draggable="false"><div class="compare-pane-empty" data-compare-empty><i data-lucide="image-off"></i><span>No box photos</span></div></div>
+      <footer><div data-compare-caption></div><div class="compare-thumbnail-rail" data-compare-thumbnails></div></footer>
+    </section>
   </div>
-  <footer><div id="detail-gallery-caption"></div><div id="detail-gallery-thumbnails" class="gallery-thumbnail-rail" aria-label="Delivery proof photos"></div></footer>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{% static 'orders/delivery_common.js' %}?v=20260716b"></script><script src="{% static 'orders/delivery_detail.js' %}?v=20260716c"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'orders/delivery_common.js' %}?v=20260716b"></script><script src="{% static 'orders/delivery_detail.js' %}?v=20260716d"></script>{% endblock %}
