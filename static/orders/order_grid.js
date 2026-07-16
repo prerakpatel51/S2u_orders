@@ -16,7 +16,7 @@ let cameraStream;
 let cameraScanPending = false;
 let cameraScanInProgress = false;
 let cameraScanAttempts = 0;
-let reopenCameraAfterAdd = true;
+let reopenCameraAfterAdd = false;
 let cameraZoomTrack;
 let cameraUsesHardwareZoom = false;
 let suggestionIndex = -1;
@@ -493,7 +493,7 @@ async function searchProducts(selectBestMatch = false) {
     const products = await apiFetch(`/api/products/search/?q=${encodeURIComponent(query)}&order_id=${window.ORDER_LIST_ID}`);
     if (requestId !== searchRequestId) return;
     const scanned = exactBarcodeProduct(products, query);
-    if (scanned) { await chooseProduct(scanned); if (fromCamera) document.getElementById('selected-on-shelf').focus(); else quickAddSelected({increment: true, reopenCamera: false}); return; }
+    if (scanned) { await chooseProduct(scanned, {reopenCamera: fromCamera}); if (fromCamera) document.getElementById('selected-on-shelf').focus(); else quickAddSelected({increment: true, reopenCamera: false}); return; }
     if (selectBestMatch && products.length) {
       await chooseProduct(products[0]);
       if (quickAddAfterSearch) quickAddSelected();
@@ -567,8 +567,9 @@ searchResults.addEventListener('click', event => {
     if (event.shiftKey) toggleBatchProduct(product); else chooseProduct(product);
   }
 });
-async function chooseProduct(product) {
+async function chooseProduct(product, {reopenCamera = false} = {}) {
   selectedProduct = product; searchResults.hidden = true; selectedPanel.hidden = false;
+  reopenCameraAfterAdd = reopenCamera;
   document.getElementById('selected-name').textContent = product.name; document.getElementById('selected-number').textContent = product.number;
   const stockElement = document.getElementById('selected-stock'); stockElement.textContent = 'Loading...';
   const existing = orderData.items.find(item => item.product === product.id);
@@ -582,7 +583,7 @@ async function chooseProduct(product) {
 }
 document.getElementById('cancel-product').addEventListener('click', clearSelected);
 function clearSelected() { selectedProduct = null; suggestionProducts = []; suggestionIndex = -1; keyboardSelectionPending = false; quickAddAfterSearch = false; selectedPanel.hidden = true; searchResults.hidden = true; searchInput.value = ''; searchInput.focus(); }
-function quickAddSelected({increment = false, reopenCamera = true} = {}) {
+function quickAddSelected({increment = false, reopenCamera = false} = {}) {
   if (!selectedProduct) return;
   const input = document.getElementById('selected-on-shelf');
   if (increment) {
@@ -596,7 +597,7 @@ document.getElementById('add-product').addEventListener('click', async () => {
   if (!selectedProduct) return;
   const button = document.getElementById('add-product'); button.disabled = true; button.textContent = 'Adding...';
   const shouldReopenCamera = reopenCameraAfterAdd;
-  reopenCameraAfterAdd = true;
+  reopenCameraAfterAdd = false;
   try {
     const row = await apiFetch(`/api/orders/${window.ORDER_LIST_ID}/items/`, {method: 'POST', body: JSON.stringify({product_id: selectedProduct.id, on_shelf_quantity: Number(document.getElementById('selected-on-shelf').value || 1), refresh_stock: selectedProduct.current_stock === undefined})});
     const existing = gridApi.getRowNode(String(row.id)); if (existing) existing.setData(row); else gridApi.applyTransaction({add: [row]});
@@ -950,7 +951,7 @@ async function startCamera() {
             cameraScanPending = true;
             searchInput.value = code;
             stopCamera();
-            await chooseProduct(product);
+            await chooseProduct(product, {reopenCamera: true});
             document.getElementById('selected-on-shelf').focus();
             return;
           }
