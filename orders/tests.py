@@ -983,7 +983,7 @@ class OrderApiTests(TestCase):
         self.assertEqual(existing.joe_quantity, 3)
         added = list(order_list.items.exclude(pk=existing.pk).order_by("row_order"))
         self.assertEqual([item.product_id for item in added], [products[1].id, products[2].id])
-        self.assertEqual([item.row_order for item in added], [5, 6])
+        self.assertEqual([item.row_order for item in added], [0, 1])
         self.assertEqual([item.on_shelf_quantity for item in added], [0, 0])
 
     def test_pdf_and_xlsx_exports(self):

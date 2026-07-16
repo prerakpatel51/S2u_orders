@@ -609,7 +609,7 @@ document.getElementById('add-product').addEventListener('click', async () => {
   reopenCameraAfterAdd = false;
   try {
     const row = await apiFetch(`/api/orders/${window.ORDER_LIST_ID}/items/`, {method: 'POST', body: JSON.stringify({product_id: selectedProduct.id, on_shelf_quantity: Number(document.getElementById('selected-on-shelf').value || 1), refresh_stock: selectedProduct.current_stock === undefined})});
-    const existing = gridApi.getRowNode(String(row.id)); if (existing) existing.setData(row); else gridApi.applyTransaction({add: [row]});
+    const existing = gridApi.getRowNode(String(row.id)); if (existing) existing.setData(row); else gridApi.applyTransaction({add: [row], addIndex: 0});
     const index = orderData.items.findIndex(item => item.id === row.id); if (index >= 0) orderData.items[index] = row; else orderData.items.push(row);
     updateCount(); clearSelected(); showToast('Product added');
     // Keep the camera capture flow moving, without opening it for a physical scanner.
@@ -631,7 +631,7 @@ document.getElementById('add-batch-selection').addEventListener('click', async e
       if (index >= 0) orderData.items[index] = row; else { orderData.items.push(row); addedRows.push(row); }
       if (node) node.setData(row);
     });
-    if (addedRows.length) gridApi.applyTransaction({add: addedRows});
+    if (addedRows.length) gridApi.applyTransaction({add: addedRows, addIndex: 0});
     clearBatchSelection();
     searchInput.value = ''; suggestionProducts = []; searchResults.hidden = true; searchInput.focus();
     updateCount();

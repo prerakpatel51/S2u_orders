@@ -8,7 +8,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.contrib.postgres.search import TrigramSimilarity
 from django.core.exceptions import ValidationError
 from django.db import close_old_connections, connection, transaction
-from django.db.models import Avg, Count, Max, Q, Sum
+from django.db.models import Avg, Count, F, Max, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.generic import TemplateView
@@ -305,18 +305,28 @@ class OrderItemCreateAPIView(APIView):
         if on_shelf < 0 or on_shelf != on_shelf.to_integral_value():
             return Response({"detail": "On-shelf quantity must be a whole, non-negative number."}, status=400)
         on_shelf = int(on_shelf)
-        item, created = OrderListItem.objects.update_or_create(
-            order_list=order_list,
-            product=product,
-            defaults={
-                "current_stock_snapshot": stock_value,
-                "monthly_needed_snapshot": need_value,
-                "on_shelf_quantity": on_shelf,
-                "row_order": order_list.items.count(),
-                "created_by": request.user,
-                "updated_by": request.user,
-            },
-        )
+        item = order_list.items.filter(product=product).first()
+        created = item is None
+        if item:
+            item.current_stock_snapshot = stock_value
+            item.monthly_needed_snapshot = need_value
+            item.on_shelf_quantity = on_shelf
+            item.updated_by = request.user
+            item.save(update_fields=["current_stock_snapshot", "monthly_needed_snapshot", "on_shelf_quantity", "updated_by", "updated_at"])
+        else:
+            # Make space for a new capture at the top without moving an
+            # already-listed product when its shelf count is updated.
+            order_list.items.update(row_order=F("row_order") + 1)
+            item = OrderListItem.objects.create(
+                order_list=order_list,
+                product=product,
+                current_stock_snapshot=stock_value,
+                monthly_needed_snapshot=need_value,
+                on_shelf_quantity=on_shelf,
+                row_order=0,
+                created_by=request.user,
+                updated_by=request.user,
+            )
         serializer = OrderListItemSerializer(item, context=item_context(order_list, request))
         return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
@@ -356,8 +366,8 @@ class OrderItemBulkCreateAPIView(APIView):
                 store=order_list.store, product_id__in=new_ids, month=month_start()
             ).values_list("product_id", "needed_quantity")
         )
-        max_order = order_list.items.aggregate(value=Max("row_order"))["value"]
-        next_order = (max_order if max_order is not None else -1) + 1
+        # Batch additions use the same newest-first ordering as single scans.
+        order_list.items.update(row_order=F("row_order") + len(new_ids))
         OrderListItem.objects.bulk_create(
             [
                 OrderListItem(
@@ -366,7 +376,7 @@ class OrderItemBulkCreateAPIView(APIView):
                     current_stock_snapshot=stocks.get(product_id, 0),
                     monthly_needed_snapshot=needs.get(product_id, 0),
                     on_shelf_quantity=0,
-                    row_order=next_order + index,
+                    row_order=index,
                     created_by=request.user,
                     updated_by=request.user,
                 )
