@@ -14,6 +14,8 @@ let preferenceTimer;
 let showingOtherStores = false;
 let cameraStream;
 let cameraScanPending = false;
+let cameraScanInProgress = false;
+let cameraScanAttempts = 0;
 let cameraZoomTrack;
 let cameraUsesHardwareZoom = false;
 let suggestionIndex = -1;
@@ -569,7 +571,8 @@ async function chooseProduct(product) {
   document.getElementById('selected-name').textContent = product.name; document.getElementById('selected-number').textContent = product.number;
   const stockElement = document.getElementById('selected-stock'); stockElement.textContent = 'Loading...';
   const existing = orderData.items.find(item => item.product === product.id);
-  document.getElementById('selected-on-shelf').value = existing ? existing.on_shelf_quantity : 0;
+  // Each new scan starts as a fresh count, including products already on the list.
+  document.getElementById('selected-on-shelf').value = 0;
   try {
     const availability = await apiFetch(`/api/products/${product.id}/availability/?order_id=${window.ORDER_LIST_ID}`);
     product.current_stock = availability.current_stock; stockElement.textContent = Number(availability.current_stock).toLocaleString();
@@ -591,6 +594,9 @@ document.getElementById('add-product').addEventListener('click', async () => {
     const existing = gridApi.getRowNode(String(row.id)); if (existing) existing.setData(row); else gridApi.applyTransaction({add: [row]});
     const index = orderData.items.findIndex(item => item.id === row.id); if (index >= 0) orderData.items[index] = row; else orderData.items.push(row);
     updateCount(); clearSelected(); showToast('Product added');
+    // Keep the capture flow moving for shelf counting: return to the scanner
+    // after the quantity has been saved.
+    startCamera();
   } catch (error) { showToast(error.message, true); } finally { button.disabled = false; button.textContent = 'Add to list'; }
 });
 document.getElementById('clear-batch-selection').addEventListener('click', clearBatchSelection);
@@ -920,8 +926,39 @@ async function startCamera() {
     cameraStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: 'environment'}}});
     const video = document.getElementById('camera-video'); video.srcObject = cameraStream; status.textContent = 'Scanning...';
     setupCameraZoom(cameraStream.getVideoTracks()[0]);
+    cameraScanAttempts = 0;
     const detector = new BarcodeDetector({formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128']});
-    const scan = async () => { if (!cameraStream) return; try { const codes = await detector.detect(video); if (codes.length) { cameraScanPending = true; searchInput.value = codes[0].rawValue; stopCamera(); searchProducts(); return; } } catch (_) {} requestAnimationFrame(scan); }; scan();
+    const scan = async () => {
+      if (!cameraStream || cameraScanInProgress) return;
+      cameraScanInProgress = true;
+      try {
+        const codes = await detector.detect(video);
+        cameraScanAttempts += 1;
+        if (codes.length) {
+          const code = codes[0].rawValue;
+          status.textContent = 'Checking barcode…';
+          const products = await apiFetch(`/api/products/search/?q=${encodeURIComponent(code)}&order_id=${window.ORDER_LIST_ID}`);
+          const product = exactBarcodeProduct(products, code);
+          if (product) {
+            cameraScanPending = true;
+            searchInput.value = code;
+            stopCamera();
+            await chooseProduct(product);
+            document.getElementById('selected-on-shelf').focus();
+            return;
+          }
+          status.textContent = 'That barcode was not recognized. Keep it centered and we will keep trying.';
+        } else if (cameraScanAttempts % 60 === 0) {
+          status.textContent = 'Still scanning — hold the barcode steady in good light.';
+        }
+      } catch (_) {
+        // A missed frame is normal on phone cameras; continue trying instead of closing.
+      } finally {
+        cameraScanInProgress = false;
+      }
+      if (cameraStream) setTimeout(() => requestAnimationFrame(scan), 180);
+    };
+    scan();
   } catch (error) { status.textContent = `Camera unavailable: ${error.message}`; }
 }
 async function scanBarcodePhoto(event) {
@@ -945,7 +982,7 @@ async function updateCameraZoom() {
   if (cameraUsesHardwareZoom && cameraZoomTrack) { try { await cameraZoomTrack.applyConstraints({advanced: [{zoom: value}]}); } catch (_) {} }
   else document.getElementById('camera-video').style.transform = `scale(${value})`;
 }
-function stopCamera() { cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null; cameraZoomTrack = null; cameraUsesHardwareZoom = false; const video=document.getElementById('camera-video'); video.style.transform='scale(1)'; document.getElementById('camera-dialog').close(); }
+function stopCamera() { cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null; cameraScanInProgress = false; cameraZoomTrack = null; cameraUsesHardwareZoom = false; const video=document.getElementById('camera-video'); video.style.transform='scale(1)'; document.getElementById('camera-dialog').close(); }
 
 loadOrder().catch(error => { gridElement.innerHTML = `<div class="form-error">${escapeHtml(error.message)}</div>`; });
 orderSearchCategoryFilter = new SearchCategoryFilter({button:document.getElementById('order-search-filter-button'),panel:document.getElementById('order-search-filter-panel'),onChange:()=>{suggestionProducts=orderSearchCategoryFilter.filter(rawSuggestionProducts);renderSuggestions();searchResults.hidden=!suggestionProducts.length;},onSelectAll:()=>{suggestionProducts.forEach(product=>batchSelectedProducts.set(product.id,product));updateBatchSelection();renderSuggestions();}});
