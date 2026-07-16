@@ -1644,6 +1644,21 @@ class DeliveryProofTests(TestCase):
             uploaded_by=self.worker,
         )
 
+    @override_settings(
+        STORAGES={"staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"}}
+    )
+    def test_delivery_detail_includes_zoomable_proof_inspector(self):
+        delivery = self.create_delivery()
+
+        response = self.client.get(f"/deliveries/{delivery.uuid}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="detail-zoom-out"')
+        self.assertContains(response, 'id="detail-zoom-reset"')
+        self.assertContains(response, 'id="detail-zoom-in"')
+        self.assertContains(response, 'id="detail-gallery-thumbnails"')
+        self.assertContains(response, "delivery_detail.js?v=20260716c")
+
     def test_worker_can_create_draft_with_notes_and_only_sees_own_deliveries(self):
         response = self.client.post(
             "/api/deliveries/",
