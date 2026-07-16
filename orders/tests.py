@@ -35,10 +35,12 @@ from .services import (
     rebuild_all_monthly_needs,
     reconcile_monthly_needs,
     recalculate_monthly_need,
+    recalculate_monthly_needs_for_pairs,
     recalculate_stale_monthly_needs,
     replay_deferred_receipts,
     reconcile_store_stocks,
     sync_monthly_receipt_history,
+    sync_receipts,
     sync_store_stocks_incremental,
 )
 from .serializers import supplier_short_name
@@ -431,6 +433,80 @@ class ReceiptSyncTests(TestCase):
         self.assertEqual(summary.quantity_sold, Decimal("5"))
         self.assertEqual(line.quantity, Decimal("5"))
         self.assertEqual(line.receipt_revision, 10)
+
+    @patch("orders.services.KoronaClient")
+    def test_incremental_sync_only_requests_live_revisions(self, client_class):
+        live = SyncState.objects.create(entity="receipts_live", last_revision=120)
+        recent = SyncState.objects.create(
+            entity="receipts_recent", cursor_data={"complete": False, "next_date": "2026-05-18"}
+        )
+        historical = SyncState.objects.create(entity="receipts", last_revision=14)
+        client = client_class.return_value
+        client.account_path.return_value = "accounts/test/receipts"
+        client.request.return_value = {"results": [], "maxRevision": 125}
+
+        counts = sync_receipts()
+
+        client.request.assert_called_once()
+        params = client.request.call_args.kwargs["params"]
+        self.assertEqual(params["revision"], 120)
+        self.assertEqual(params["sort"], "revision")
+        self.assertNotIn("maxBookingTime", params)
+        live.refresh_from_db()
+        recent.refresh_from_db()
+        historical.refresh_from_db()
+        self.assertEqual(live.last_revision, 125)
+        self.assertEqual(recent.cursor_data["next_date"], "2026-05-18")
+        self.assertEqual(historical.last_revision, 14)
+        self.assertEqual(counts["starting_revision"], 120)
+        self.assertEqual(counts["ending_revision"], 125)
+        self.assertEqual(counts["products_recalculated"], 0)
+
+    @patch("orders.services.KoronaClient")
+    def test_incremental_sync_updates_changed_receipt_and_affected_total(self, client_class):
+        affected, initial_counts = set(), {"created": 0, "updated": 0}
+        _apply_receipt(self.receipt(2, revision=10), affected, initial_counts)
+        SyncState.objects.create(entity="receipts_live", last_revision=10)
+        changed = self.receipt(5, revision=11)
+        client = client_class.return_value
+        client.account_path.return_value = "accounts/test/receipts"
+        client.request.return_value = {"results": [changed], "maxRevision": 11}
+
+        counts = sync_receipts()
+
+        line = ReceiptSaleLine.objects.get(receipt_id=self.receipt_id, product=self.product)
+        total = self.product.productmonthlyneed_set.get(store=self.store)
+        self.assertEqual(line.quantity, Decimal("5"))
+        self.assertEqual(total.needed_quantity, Decimal("5"))
+        self.assertEqual(counts["seen"], 1)
+        self.assertEqual(counts["updated"], 1)
+        self.assertEqual(counts["products_recalculated"], 1)
+
+    def test_changed_monthly_totals_are_recalculated_in_bulk(self):
+        second_product = Product.objects.create(
+            korona_id=uuid.uuid4(), number="200", name="Second Bottle"
+        )
+        today = timezone.localdate()
+        SalesDailySummary.objects.create(
+            store=self.store, product=self.product, sales_date=today, quantity_sold=3
+        )
+        SalesDailySummary.objects.create(
+            store=self.store, product=second_product, sales_date=today, quantity_sold=7
+        )
+
+        updated = recalculate_monthly_needs_for_pairs(
+            {(self.store.id, self.product.id), (self.store.id, second_product.id)}
+        )
+
+        self.assertEqual(updated, 2)
+        self.assertEqual(
+            self.product.productmonthlyneed_set.get(store=self.store).needed_quantity,
+            Decimal("3"),
+        )
+        self.assertEqual(
+            second_product.productmonthlyneed_set.get(store=self.store).needed_quantity,
+            Decimal("7"),
+        )
 
     def test_monthly_need_is_exact_trailing_30_day_sales(self):
         today = timezone.localdate()

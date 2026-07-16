@@ -1,6 +1,6 @@
 import logging
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -386,6 +386,69 @@ def recalculate_monthly_need(store_id, product_id, target_month=None):
     return obj
 
 
+def recalculate_monthly_needs_for_pairs(pairs, target_month=None):
+    """Recalculate only changed store/product totals in a bounded number of queries."""
+    pairs = {(int(store_id), int(product_id)) for store_id, product_id in pairs}
+    if not pairs:
+        return 0
+
+    today = timezone.localdate()
+    target_month = target_month or month_start(today)
+    start_30 = today - timedelta(days=29)
+    store_ids = {store_id for store_id, _ in pairs}
+    product_ids = {product_id for _, product_id in pairs}
+    totals = {
+        (row["store_id"], row["product_id"]): row["total"]
+        for row in SalesDailySummary.objects.filter(
+            store_id__in=store_ids,
+            product_id__in=product_ids,
+            sales_date__range=(start_30, today),
+        )
+        .values("store_id", "product_id")
+        .annotate(total=Sum("quantity_sold"))
+        if (row["store_id"], row["product_id"]) in pairs
+    }
+    existing = {
+        (row.store_id, row.product_id): row
+        for row in ProductMonthlyNeed.objects.filter(
+            month=target_month,
+            store_id__in=store_ids,
+            product_id__in=product_ids,
+        )
+        if (row.store_id, row.product_id) in pairs
+    }
+    calculated_at = timezone.now()
+    create_rows = []
+    update_rows = []
+    for store_id, product_id in pairs:
+        values = _monthly_need_values(
+            totals.get((store_id, product_id), Decimal("0")), calculated_at
+        )
+        row = existing.get((store_id, product_id))
+        if row is None:
+            create_rows.append(
+                ProductMonthlyNeed(
+                    store_id=store_id,
+                    product_id=product_id,
+                    month=target_month,
+                    **values,
+                )
+            )
+            continue
+        for field, value in values.items():
+            setattr(row, field, value)
+        row.updated_at = calculated_at
+        update_rows.append(row)
+
+    ProductMonthlyNeed.objects.bulk_create(create_rows, batch_size=1000)
+    ProductMonthlyNeed.objects.bulk_update(
+        update_rows,
+        ["needed_quantity", "avg_daily_sales_30", "last_calculated_at", "updated_at"],
+        batch_size=1000,
+    )
+    return len(pairs)
+
+
 def _monthly_need_values(sold_30, calculated_at):
     sold_30 = max(sold_30, Decimal("0"))
     return {
@@ -533,74 +596,26 @@ def _sync_revision_receipts(client, state, affected, counts, batch_pages, initia
     state.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
 
 
-def _sync_recent_receipts(client, affected, counts, days_per_run=2, lookback_days=90):
-    state = get_sync_state("receipts_recent")
-    today = timezone.localdate()
-    cutoff = today - timedelta(days=lookback_days - 1)
-    try:
-        next_date = date.fromisoformat(state.cursor_data.get("next_date", ""))
-    except ValueError:
-        next_date = today
-    if next_date < cutoff:
-        state.cursor_data = {"complete": True, "next_date": next_date.isoformat()}
-        state.last_synced_at = timezone.now()
-        state.save(update_fields=["cursor_data", "last_synced_at", "updated_at"])
-        return
-
-    for _ in range(days_per_run):
-        if next_date < cutoff:
-            break
-        day_start = timezone.make_aware(datetime.combine(next_date, time.min))
-        day_end = timezone.make_aware(datetime.combine(next_date, time.max)).replace(microsecond=0)
-        page = 1
-        while True:
-            payload = client.request(
-                "GET",
-                client.account_path("receipts"),
-                params={
-                    "minBookingTime": day_start.isoformat(timespec="seconds"),
-                    "maxBookingTime": day_end.isoformat(timespec="seconds"),
-                    "voidedItems": "true",
-                    "omitPageCounts": "true",
-                    "sort": "-revision",
-                    "size": 100,
-                    "page": page,
-                },
-            ) or {}
-            receipts = payload.get("results") or []
-            for receipt in receipts:
-                counts["seen"] += 1
-                _apply_receipt(receipt, affected, counts)
-            if len(receipts) < 100:
-                break
-            page += 1
-        next_date -= timedelta(days=1)
-        state.cursor_data = {"complete": next_date < cutoff, "next_date": next_date.isoformat()}
-        state.last_synced_at = timezone.now()
-        state.save(update_fields=["cursor_data", "last_synced_at", "updated_at"])
-
-
-def sync_receipts(batch_pages=20, recent_days_per_run=2):
+def sync_receipts(batch_pages=5):
+    """Apply only receipts changed after the live revision cursor."""
     client = KoronaClient()
     counts = {"seen": 0, "created": 0, "updated": 0}
     affected = set()
+    state = get_sync_state("receipts_live")
+    starting_revision = state.last_revision
 
-    # Keep new transactions current while recent demand history fills newest-first.
     _sync_revision_receipts(
-        client, get_sync_state("receipts_live"), affected, counts, min(batch_pages, 5), initialize_to_latest=True
+        client,
+        state,
+        affected,
+        counts,
+        max(1, min(batch_pages, 5)),
+        initialize_to_latest=True,
     )
-    _sync_recent_receipts(client, affected, counts, days_per_run=recent_days_per_run)
-    # Continue the older revision backfill as a repair/history safety net.
-    recent_complete = get_sync_state("receipts_recent").cursor_data.get("complete", False)
-    historical_pages = batch_pages if recent_complete else min(batch_pages, 5)
-    _sync_revision_receipts(client, get_sync_state("receipts"), affected, counts, historical_pages)
-
-    for store_id, product_id in affected:
-        recalculate_monthly_need(store_id, product_id)
-    stale_totals = recalculate_stale_monthly_needs()
-    counts["products_recalculated"] = len(affected)
-    counts["stale_totals_recalculated"] = stale_totals
+    counts["products_recalculated"] = recalculate_monthly_needs_for_pairs(affected)
     counts["deferred"] = DeferredReceipt.objects.count()
+    counts["starting_revision"] = starting_revision
+    counts["ending_revision"] = state.last_revision
     return counts
 
 

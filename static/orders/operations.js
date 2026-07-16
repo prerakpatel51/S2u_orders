@@ -7,7 +7,7 @@ const endpointHealthList = document.getElementById('endpoint-health-list');
 let operationsTimer;
 let operationsData;
 
-const serviceLabels = {stores: 'Stores', products: 'Products & barcodes', stocks: 'Stock changes', stock_reconciliation: 'Nightly stock reconciliation', receipts: 'Update monthly from KORONA', monthly_reconciliation: 'Nightly monthly reconciliation'};
+const serviceLabels = {stores: 'Stores', products: 'Products & barcodes', stocks: 'Stock changes', stock_reconciliation: 'Nightly stock reconciliation', receipts: 'Receipt revision updates', monthly_reconciliation: 'Nightly monthly reconciliation'};
 const countLabels = {active_stores: 'Active stock stores', products: 'Products', stock_records: 'Stock records', thirty_day_totals: '30-day totals'};
 const metricDefinitions = {
   stores: [['seen', 'Units checked'], ['created', 'Stores added'], ['updated', 'Stores updated']],
