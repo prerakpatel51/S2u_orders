@@ -1,18 +1,90 @@
 const searchInput=document.getElementById('bulk-product-search'),results=document.getElementById('bulk-search-results'),selected=new Map();
 let data,suggestions=[],rawSuggestions=[],suggestionIndex=-1,searchTimer,gridApi,bulkSearchCategoryFilter,notesTimer;
+let searchRequestId=0,lastCompletedQuery='',searchPending=false,searchError='';
 const escapeHtml=value=>{const node=document.createElement('div');node.textContent=value??'';return node.innerHTML;};
 const number=value=>Number(value||0).toLocaleString(undefined,{maximumFractionDigits:3});
 const barcodeVariants=value=>{const code=String(value||'').trim();if(!/^\d{7,15}$/.test(code))return new Set();const stripped=code.replace(/^0+/,'')||'0',values=new Set([code,stripped,`0${code}`,`0${stripped}`]);if(code.endsWith('0')&&code.length>7){values.add(code.slice(0,-1));values.add(code.slice(0,-1).replace(/^0+/,'')||'0');}if(code.length<15)values.add(`${code}0`);return values;};
 const exactBarcodeProduct=(products,query)=>{const variants=barcodeVariants(query);if(!variants.size)return null;const matches=products.filter(product=>product.codes.some(code=>variants.has(String(code).replace(/\D/g,''))));return matches.length===1?matches[0]:null;};
 function updateSelected(){document.getElementById('bulk-selected-count').textContent=selected.size;document.getElementById('add-bulk-selected').disabled=!selected.size;renderSuggestions();}
-function renderSuggestions(){results.innerHTML=suggestions.length?suggestions.map((product,index)=>`<div class="suggestion-item bulk-suggestion${index===suggestionIndex?' active':''}${selected.has(product.id)?' batch-selected':''}" data-index="${index}"><label><input class="bulk-result-check" type="checkbox" ${selected.has(product.id)?'checked':''}></label><button type="button"><span class="suggestion-copy"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.number)}${product.codes.length?` · ${escapeHtml(product.codes[0])}`:''}</small></span><span class="suggestion-action">Add</span></button></div>`).join(''):'<p>No matching products</p>';results.hidden=!suggestions.length;}
+function existingProductIds(){return new Set((data?.items||[]).map(item=>Number(item.product_id)));}
+function applySuggestionFilters(){
+  const filtered=bulkSearchCategoryFilter?bulkSearchCategoryFilter.filter(rawSuggestions):rawSuggestions;
+  const existing=existingProductIds();
+  suggestions=filtered.filter(product=>!existing.has(Number(product.id)));
+  suggestionIndex=-1;
+  renderSuggestions();
+}
+function renderSuggestions(){
+  const query=searchInput.value.trim();
+  if(!query){results.hidden=true;results.innerHTML='';return;}
+  if(searchPending){results.innerHTML='<p class="suggestion-loading">Searching products…</p>';results.hidden=false;return;}
+  if(searchError){results.innerHTML=`<p class="suggestion-loading">${escapeHtml(searchError)}</p>`;results.hidden=false;return;}
+  if(!suggestions.length){
+    const existing=existingProductIds();
+    const allAlreadyAdded=rawSuggestions.length>0&&rawSuggestions.every(product=>existing.has(Number(product.id)));
+    results.innerHTML=`<p class="suggestion-loading">${allAlreadyAdded?'All matching products are already in this bulk order.':'No matching products.'}</p>`;
+    results.hidden=false;
+    return;
+  }
+  results.innerHTML=`<p class="suggestion-result-count">${suggestions.length.toLocaleString()} matching product${suggestions.length===1?'':'s'}</p>${suggestions.map((product,index)=>`<div class="suggestion-item bulk-suggestion${index===suggestionIndex?' active':''}${selected.has(product.id)?' batch-selected':''}" data-index="${index}"><label><input class="bulk-result-check" type="checkbox" aria-label="Select ${escapeHtml(product.name)}" ${selected.has(product.id)?'checked':''}></label><button type="button"><span class="suggestion-copy"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.number)}${product.codes.length?` · ${escapeHtml(product.codes[0])}`:''}</small></span><span class="suggestion-action">Add</span></button></div>`).join('')}`;
+  results.hidden=false;
+  results.querySelector('.suggestion-item.active')?.scrollIntoView({block:'nearest'});
+}
 function selectProduct(index,toggle=false){const product=suggestions[index];if(!product)return;if(toggle&&selected.has(product.id))selected.delete(product.id);else selected.set(product.id,product);suggestionIndex=index;updateSelected();}
-async function searchProducts(){const query=searchInput.value.trim();if(!query){results.hidden=true;return;}try{rawSuggestions=await apiFetch(`/api/products/search/?q=${encodeURIComponent(query)}`);const scanned=exactBarcodeProduct(rawSuggestions,query);if(scanned){results.hidden=true;await addProducts([scanned.id]);return;}suggestions=bulkSearchCategoryFilter?bulkSearchCategoryFilter.filter(rawSuggestions):rawSuggestions;suggestionIndex=-1;renderSuggestions();}catch(error){showToast(error.message,true);}}
-searchInput.addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(searchProducts,220);});
-searchInput.addEventListener('keydown',event=>{if(!suggestions.length)return;if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();suggestionIndex=event.key==='ArrowDown'?Math.min(suggestionIndex+1,suggestions.length-1):Math.max(suggestionIndex-1,0);if(event.shiftKey)selectProduct(suggestionIndex);else renderSuggestions();}else if(event.key==='Enter'){event.preventDefault();if(event.shiftKey)selectProduct(suggestionIndex<0?0:suggestionIndex,true);else addProducts(selected.size?[...selected.keys()]:[suggestions[suggestionIndex<0?0:suggestionIndex].id]);}else if(event.key==='Escape')results.hidden=true;});
+async function searchProducts(addBestMatch=false){
+  const query=searchInput.value.trim();
+  const currentRequest=++searchRequestId;
+  clearTimeout(searchTimer);
+  if(!query){rawSuggestions=[];suggestions=[];lastCompletedQuery='';searchPending=false;searchError='';renderSuggestions();return;}
+  searchPending=true;searchError='';suggestions=[];renderSuggestions();
+  try{
+    const response=await apiFetch(`/api/products/search/?q=${encodeURIComponent(query)}`);
+    if(currentRequest!==searchRequestId||searchInput.value.trim()!==query)return;
+    rawSuggestions=response;
+    lastCompletedQuery=query;
+    searchPending=false;
+    applySuggestionFilters();
+    const scanned=exactBarcodeProduct(suggestions,query);
+    if(scanned){results.hidden=true;await addProducts([scanned.id]);return;}
+    if(addBestMatch&&suggestions.length){
+      if(selected.size)await addProducts([...selected.keys()]);
+      else await addProducts([suggestions[0].id]);
+    }
+  }catch(error){
+    if(currentRequest!==searchRequestId)return;
+    searchPending=false;searchError=error.message||'Search failed. Try again.';renderSuggestions();showToast(searchError,true);
+  }
+}
+searchInput.addEventListener('input',()=>{
+  clearTimeout(searchTimer);
+  searchRequestId+=1;
+  rawSuggestions=[];suggestions=[];suggestionIndex=-1;searchPending=Boolean(searchInput.value.trim());searchError='';
+  if(!searchInput.value.trim()){lastCompletedQuery='';renderSuggestions();return;}
+  renderSuggestions();
+  searchTimer=setTimeout(()=>searchProducts(false),220);
+});
+searchInput.addEventListener('keydown',event=>{
+  if(event.key==='Escape'){results.hidden=true;return;}
+  if(event.key==='Enter'){
+    event.preventDefault();
+    clearTimeout(searchTimer);
+    const query=searchInput.value.trim();
+    if(!query)return;
+    if(searchPending||lastCompletedQuery!==query){searchProducts(!event.shiftKey);return;}
+    if(!suggestions.length)return;
+    if(event.shiftKey)selectProduct(suggestionIndex<0?0:suggestionIndex,true);
+    else addProducts(selected.size?[...selected.keys()]:[suggestions[suggestionIndex<0?0:suggestionIndex].id]);
+    return;
+  }
+  if(!suggestions.length)return;
+  if(event.key==='ArrowDown'||event.key==='ArrowUp'){
+    event.preventDefault();suggestionIndex=event.key==='ArrowDown'?Math.min(suggestionIndex+1,suggestions.length-1):Math.max(suggestionIndex-1,0);
+    if(event.shiftKey)selectProduct(suggestionIndex);else renderSuggestions();
+  }
+});
 results.addEventListener('click',event=>{const row=event.target.closest('[data-index]');if(!row)return;event.stopPropagation();const index=Number(row.dataset.index);if(event.target.closest('.bulk-result-check')){event.preventDefault();selectProduct(index,true);}else if(event.target.closest('button'))addProducts([suggestions[index].id]);});
 document.addEventListener('click',event=>{if(!event.target.closest('.bulk-search-wrap'))results.hidden=true;});
-async function addProducts(ids){if(!ids.length)return;try{await apiFetch(`/api/bulk-orders/${window.BULK_ORDER_ID}/items/`,{method:'POST',body:JSON.stringify({product_ids:ids})});selected.clear();suggestions=[];searchInput.value='';results.hidden=true;await loadBulkOrder();searchInput.focus();showToast('Products added');}catch(error){showToast(error.message,true);}}
+async function addProducts(ids){if(!ids.length)return;try{const response=await apiFetch(`/api/bulk-orders/${window.BULK_ORDER_ID}/items/`,{method:'POST',body:JSON.stringify({product_ids:ids})});selected.clear();rawSuggestions=[];suggestions=[];lastCompletedQuery='';searchInput.value='';results.hidden=true;await loadBulkOrder();searchInput.focus();showToast(response.created===1?'Product added':`${response.created} products added`);}catch(error){showToast(error.message,true);}}
 document.getElementById('add-bulk-selected').addEventListener('click',()=>addProducts([...selected.keys()]));
 function caseRenderer(params){const value=params.value||{},wrap=document.createElement('div');wrap.className='bulk-store-cell';wrap.innerHTML=`<div><span>Stock <strong>${number(value.stock)}</strong></span><span>Monthly <strong>${number(value.monthly_needed)}</strong></span></div><input type="number" min="0" step="1" value="${Number(value.cases||0)}" aria-label="Cases for ${params.colDef.headerName}">`;const input=wrap.querySelector('input');input.addEventListener('click',event=>event.stopPropagation());input.addEventListener('change',async()=>{const old=Number(value.cases||0),next=Math.max(0,Number(input.value||0));input.disabled=true;try{await apiFetch(`/api/bulk-order-items/${params.data.id}/`,{method:'PATCH',body:JSON.stringify({store_id:value.store_id,cases:next})});value.cases=next;updateTotals();gridApi.refreshCells({rowNodes:[params.node],columns:['total_cases']});}catch(error){input.value=old;showToast(error.message,true);}finally{input.disabled=false;}});return wrap;}
 function removeRenderer(params){const button=document.createElement('button');button.className='grid-delete';button.textContent='×';button.title='Remove product';button.addEventListener('click',async()=>{if(!confirm(`Remove ${params.data.product_name}?`))return;await apiFetch(`/api/bulk-order-items/${params.data.id}/`,{method:'DELETE'});data.items=data.items.filter(item=>item.id!==params.data.id);gridApi.applyTransaction({remove:[params.data]});updateTotals();});return button;}
@@ -22,7 +94,7 @@ async function loadBulkOrder(){data=await apiFetch(`/api/bulk-orders/${window.BU
 document.getElementById('clear-bulk-cases').addEventListener('click',async()=>{if(!confirm('Set every case quantity in this list to zero?'))return;await apiFetch(`/api/bulk-orders/${window.BULK_ORDER_ID}/clear/`,{method:'POST'});data.items.forEach(item=>item.stores.forEach(store=>{store.cases=0;}));gridApi.refreshCells({force:true});updateTotals();showToast('Cases cleared');});
 document.getElementById('delete-bulk-order').addEventListener('click',async()=>{if(!confirm('Delete this entire bulk order?'))return;await apiFetch(`/api/bulk-orders/${window.BULK_ORDER_ID}/`,{method:'DELETE'});location.href='/bulk-orders/';});
 loadBulkOrder().catch(error=>showToast(error.message,true));
-bulkSearchCategoryFilter=new SearchCategoryFilter({button:document.getElementById('bulk-search-filter-button'),panel:document.getElementById('bulk-search-filter-panel'),onChange:()=>{suggestions=bulkSearchCategoryFilter.filter(rawSuggestions);renderSuggestions();},onSelectAll:()=>{suggestions.forEach(product=>selected.set(product.id,product));updateSelected();}});
+bulkSearchCategoryFilter=new SearchCategoryFilter({button:document.getElementById('bulk-search-filter-button'),panel:document.getElementById('bulk-search-filter-panel'),onChange:applySuggestionFilters,onSelectAll:()=>{suggestions.forEach(product=>selected.set(product.id,product));updateSelected();}});
 
 const BULK_LAYOUT_KEY=`bulk-order-layout-${window.BULK_ORDER_ID}`;
 function saveBulkLayout(){if(!gridApi)return;localStorage.setItem(BULK_LAYOUT_KEY,JSON.stringify({columns:gridApi.getColumnState(),filters:gridApi.getFilterModel()}));}
