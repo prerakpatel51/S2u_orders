@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -15,6 +16,8 @@ from .models import (
     DeferredReceipt,
     Delivery,
     DeliveryAsset,
+    DeliveryAssetReplica,
+    DeliveryBackup,
     DeliveryEvent,
     DeliveryKeyword,
     OrderItemTransfer,
@@ -1516,6 +1519,10 @@ class OrderApiTests(TestCase):
     DELIVERY_BUCKET_NAME="proof-bucket",
     DELIVERY_BUCKET_ACCESS_KEY_ID="test-key",
     DELIVERY_BUCKET_SECRET_ACCESS_KEY="test-secret",
+    DELIVERY_DR_BUCKET_ENDPOINT="https://recovery.example.test",
+    DELIVERY_DR_BUCKET_NAME="proof-recovery-bucket",
+    DELIVERY_DR_BUCKET_ACCESS_KEY_ID="recovery-key",
+    DELIVERY_DR_BUCKET_SECRET_ACCESS_KEY="recovery-secret",
 )
 class DeliveryProofTests(TestCase):
     def setUp(self):
@@ -1706,3 +1713,108 @@ class DeliveryProofTests(TestCase):
         exported = self.client.get("/api/deliveries/export.csv")
         self.assertEqual(exported.status_code, 200)
         self.assertIn("INV-CSV", exported.content.decode())
+
+    @patch("orders.delivery_storage.dr_client")
+    @patch("orders.delivery_storage.client")
+    def test_asset_replication_uses_identical_path_and_verifies_checksum(
+        self, primary_client, recovery_client
+    ):
+        from .delivery_storage import replicate_asset
+
+        delivery = self.create_delivery()
+        asset = self.add_asset(delivery, DeliveryAsset.Category.INVOICE, "invoice.jpg")
+        body = b"\xff\xd8\xffdelivery-proof"
+        asset.size_bytes = len(body)
+        asset.checksum_sha256 = ""
+        asset.save(update_fields=["size_bytes", "checksum_sha256"])
+        primary_client.return_value.get_object.return_value = {"Body": BytesIO(body)}
+        checksum = hashlib.sha256(body).hexdigest()
+        recovery_client.return_value.head_object.return_value = {
+            "ContentLength": len(body),
+            "Metadata": {"sha256": checksum},
+        }
+
+        replica = replicate_asset(asset)
+
+        self.assertEqual(replica.status, DeliveryAssetReplica.Status.VERIFIED)
+        self.assertEqual(replica.object_key, asset.object_key)
+        self.assertEqual(replica.checksum_sha256, checksum)
+        put = recovery_client.return_value.put_object.call_args.kwargs
+        self.assertEqual(put["Bucket"], "proof-recovery-bucket")
+        self.assertEqual(put["Key"], asset.object_key)
+        self.assertEqual(put["Body"], body)
+
+    @patch("orders.delivery_storage.dr_client")
+    @patch("orders.delivery_storage.client")
+    def test_download_automatically_fails_over_to_verified_recovery_copy(
+        self, primary_client, recovery_client
+    ):
+        from .delivery_storage import signed_asset_download
+
+        asset = self.add_asset(self.create_delivery(), DeliveryAsset.Category.BOXES, "boxes.jpg")
+        DeliveryAssetReplica.objects.create(
+            asset=asset,
+            status=DeliveryAssetReplica.Status.VERIFIED,
+            object_key=asset.object_key,
+            size_bytes=asset.size_bytes,
+            checksum_sha256="a" * 64,
+        )
+        primary_client.return_value.head_object.side_effect = RuntimeError("primary unavailable")
+        recovery_client.return_value.head_object.return_value = {"ContentLength": asset.size_bytes}
+        recovery_client.return_value.generate_presigned_url.return_value = (
+            "https://recovery.example.test/signed"
+        )
+
+        url = signed_asset_download(asset)
+
+        self.assertEqual(url, "https://recovery.example.test/signed")
+        recovery_client.return_value.head_object.assert_called_once_with(
+            Bucket="proof-recovery-bucket", Key=asset.object_key
+        )
+
+    @patch("orders.delivery_storage.queue_asset_replication")
+    @patch("orders.delivery_storage.put_bytes", return_value=(42, "b" * 64))
+    def test_notes_snapshots_are_immutable_versioned_objects(self, _put, queue):
+        from .delivery_storage import notes_snapshot
+
+        delivery = self.create_delivery()
+        first = notes_snapshot(delivery)
+        second = notes_snapshot(delivery)
+
+        self.assertNotEqual(first.object_key, second.object_key)
+        self.assertIn(f"{delivery.storage_prefix}/notes/delivery-notes-", first.object_key)
+        self.assertEqual(delivery.assets.filter(category=DeliveryAsset.Category.NOTES).count(), 2)
+        self.assertEqual(queue.call_count, 2)
+
+    @patch("orders.delivery_storage.put_dr_bytes", return_value=(256, "c" * 64))
+    def test_metadata_catalog_is_written_only_to_recovery_bucket(self, put_dr):
+        from .delivery_storage import create_metadata_backup
+
+        self.create_delivery(reference_number="DR-CATALOG")
+        backup = DeliveryBackup.objects.create(created_by=self.admin)
+
+        key, delivery_count, _asset_count, size = create_metadata_backup(backup)
+
+        self.assertTrue(key.startswith("backups/delivery-metadata/"))
+        self.assertEqual(delivery_count, 1)
+        self.assertEqual(size, 256)
+        put_dr.assert_called_once()
+
+    def test_admin_recovery_panel_reports_replication_coverage(self):
+        asset = self.add_asset(
+            self.create_delivery(), DeliveryAsset.Category.INVOICE, "invoice.jpg"
+        )
+        DeliveryAssetReplica.objects.create(
+            asset=asset,
+            status=DeliveryAssetReplica.Status.VERIFIED,
+            object_key=asset.object_key,
+            size_bytes=asset.size_bytes,
+            checksum_sha256="d" * 64,
+        )
+        self.client.force_login(self.admin)
+
+        data = self.client.get("/api/delivery-backups/").json()
+
+        self.assertTrue(data["dr_storage_configured"])
+        self.assertEqual(data["replication"]["coverage_percent"], 100.0)
+        self.assertEqual(data["replication"]["verified_assets"], 1)

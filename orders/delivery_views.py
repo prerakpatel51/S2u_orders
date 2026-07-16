@@ -22,16 +22,20 @@ from .delivery_storage import (
     build_delivery_zip,
     confirm_object,
     create_metadata_backup,
+    dr_is_configured,
     is_configured,
     notes_snapshot,
     presigned_upload,
+    queue_asset_replication,
     safe_filename,
-    signed_download,
+    signed_asset_download,
+    signed_dr_download,
     validate_image_object,
 )
 from .models import (
     Delivery,
     DeliveryAsset,
+    DeliveryAssetReplica,
     DeliveryBackup,
     DeliveryEvent,
     DeliveryKeyword,
@@ -122,6 +126,7 @@ def user_label(user):
 
 
 def serialize_asset(asset):
+    replica = getattr(asset, "replica", None)
     return {
         "uuid": str(asset.uuid),
         "category": asset.category,
@@ -131,6 +136,9 @@ def serialize_asset(asset):
         "checksum_sha256": asset.checksum_sha256,
         "status": asset.upload_status,
         "position": asset.position,
+        "replica_status": replica.status if replica else "pending",
+        "replicated_at": replica.replicated_at if replica else None,
+        "replica_verified_at": replica.verified_at if replica else None,
         "view_url": f"/api/delivery-assets/{asset.uuid}/view/",
     }
 
@@ -210,7 +218,7 @@ def serialize_delivery(delivery, request, *, detail=False):
 
 
 def delivery_queryset(*, include_events=False):
-    related = ["keywords", "assets"]
+    related = ["keywords", "assets__replica"]
     if include_events:
         related.append("events__actor")
     return Delivery.objects.select_related("store", "submitted_by", "reviewed_by").prefetch_related(
@@ -438,8 +446,12 @@ class DeliveryAssetCompleteAPIView(APIView):
             asset.save(update_fields=["upload_status", "updated_at"])
             return Response({"detail": str(exc)}, status=400)
         asset.upload_status = DeliveryAsset.UploadStatus.UPLOADED
-        asset.checksum_sha256 = str(request.data.get("checksum_sha256", ""))[:64]
+        supplied_checksum = str(request.data.get("checksum_sha256", "")).lower()
+        asset.checksum_sha256 = (
+            supplied_checksum if re.fullmatch(r"[0-9a-f]{64}", supplied_checksum) else ""
+        )
         asset.save(update_fields=["upload_status", "checksum_sha256", "updated_at"])
+        queue_asset_replication(asset.pk)
         DeliveryEvent.objects.create(
             delivery=delivery,
             event_type=DeliveryEvent.EventType.PHOTO_ADDED,
@@ -576,16 +588,14 @@ class DeliveryKeywordsAPIView(APIView):
 class DeliveryAssetViewAPIView(APIView):
     def get(self, request, asset_uuid):
         asset = get_object_or_404(
-            DeliveryAsset.objects.select_related("delivery"),
+            DeliveryAsset.objects.select_related("delivery", "replica"),
             uuid=asset_uuid,
             upload_status=DeliveryAsset.UploadStatus.UPLOADED,
         )
         if not is_delivery_admin(request.user) and asset.delivery.submitted_by_id != request.user.id:
             return Response({"detail": "You do not have access to this photo."}, status=403)
         try:
-            url = signed_download(
-                asset.object_key, filename=asset.original_filename, content_type=asset.content_type
-            )
+            url = signed_asset_download(asset)
         except DeliveryStorageError as exc:
             return Response({"detail": str(exc)}, status=503)
         return HttpResponseRedirect(url)
@@ -637,12 +647,30 @@ class DeliveryCSVExportAPIView(APIView):
                 "Invoice photos",
                 "Box photos",
                 "Damage photos",
+                "DR verified files",
+                "DR pending or failed files",
             ]
         )
         for delivery in delivery_queryset():
             assets = list(delivery.assets.all())
             category_count = lambda category: sum(
                 item.category == category and item.upload_status == "uploaded" for item in assets
+            )
+            verified_count = sum(
+                1
+                for item in assets
+                if item.upload_status == DeliveryAsset.UploadStatus.UPLOADED
+                and getattr(item, "replica", None)
+                and item.replica.status == DeliveryAssetReplica.Status.VERIFIED
+            )
+            unprotected_count = sum(
+                1
+                for item in assets
+                if item.upload_status == DeliveryAsset.UploadStatus.UPLOADED
+                and (
+                    not getattr(item, "replica", None)
+                    or item.replica.status != DeliveryAssetReplica.Status.VERIFIED
+                )
             )
             writer.writerow(
                 [
@@ -664,6 +692,8 @@ class DeliveryCSVExportAPIView(APIView):
                     category_count("invoice"),
                     category_count("boxes"),
                     category_count("damage"),
+                    verified_count,
+                    unprotected_count,
                 ]
             )
         return response
@@ -674,9 +704,30 @@ class DeliveryBackupAPIView(APIView):
 
     def get(self, request):
         backups = DeliveryBackup.objects.select_related("created_by")[:30]
+        uploaded = DeliveryAsset.objects.filter(upload_status=DeliveryAsset.UploadStatus.UPLOADED)
+        total_assets = uploaded.count()
+        verified_assets = uploaded.filter(
+            replica__status=DeliveryAssetReplica.Status.VERIFIED
+        ).count()
+        failed_assets = uploaded.filter(
+            replica__status__in=[
+                DeliveryAssetReplica.Status.FAILED,
+                DeliveryAssetReplica.Status.MISSING,
+            ]
+        ).count()
         return Response(
             {
                 "storage_configured": is_configured(),
+                "dr_storage_configured": dr_is_configured(),
+                "replication": {
+                    "total_assets": total_assets,
+                    "verified_assets": verified_assets,
+                    "pending_assets": total_assets - verified_assets - failed_assets,
+                    "failed_assets": failed_assets,
+                    "coverage_percent": round((verified_assets / total_assets) * 100, 1)
+                    if total_assets
+                    else 100.0,
+                },
                 "backups": [
                     {
                         "uuid": str(item.uuid),
@@ -697,6 +748,16 @@ class DeliveryBackupAPIView(APIView):
         )
 
     def post(self, request):
+        if request.data.get("action") == "sync":
+            if not dr_is_configured():
+                return Response(
+                    {"detail": "Delivery disaster-recovery storage is not configured."},
+                    status=503,
+                )
+            from .tasks import reconcile_delivery_replicas_task
+
+            reconcile_delivery_replicas_task.delay()
+            return Response({"queued": True}, status=202)
         backup = DeliveryBackup.objects.create(created_by=request.user)
         try:
             key, delivery_count, asset_count, size_bytes = create_metadata_backup(backup)
@@ -731,7 +792,7 @@ class DeliveryBackupDownloadAPIView(APIView):
             DeliveryBackup, uuid=backup_uuid, status=DeliveryBackup.Status.COMPLETE
         )
         try:
-            url = signed_download(
+            url = signed_dr_download(
                 backup.object_key,
                 filename=f"s2u-delivery-metadata-{backup.created_at:%Y%m%d-%H%M%S}.json.gz",
                 content_type="application/gzip",

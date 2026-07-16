@@ -389,6 +389,34 @@ class DeliveryAsset(TimeStampedModel):
         indexes = [models.Index(fields=["delivery", "category", "position"])]
 
 
+class DeliveryAssetReplica(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        COPYING = "copying", "Copying"
+        VERIFIED = "verified", "Verified"
+        FAILED = "failed", "Failed"
+        MISSING = "missing", "Missing"
+
+    asset = models.OneToOneField(
+        DeliveryAsset, related_name="replica", on_delete=models.CASCADE
+    )
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    object_key = models.CharField(max_length=900)
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    checksum_sha256 = models.CharField(max_length=64, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    replicated_at = models.DateTimeField(null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        indexes = [models.Index(fields=["status", "updated_at"])]
+
+
 class DeliveryKeyword(TimeStampedModel):
     name = models.CharField(max_length=64)
     normalized_name = models.CharField(max_length=64, unique=True, db_index=True)

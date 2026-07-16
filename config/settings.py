@@ -171,6 +171,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "orders.tasks.backup_delivery_metadata_task",
         "schedule": crontab(hour=2, minute=30),
     },
+    "reconcile-delivery-replicas": {
+        "task": "orders.tasks.reconcile_delivery_replicas_task",
+        "schedule": crontab(minute="*/15"),
+    },
     "cleanup-abandoned-delivery-uploads": {
         "task": "orders.tasks.cleanup_abandoned_delivery_uploads_task",
         "schedule": crontab(minute=15),
@@ -203,6 +207,14 @@ DELIVERY_BUCKET_SECRET_ACCESS_KEY = os.getenv(
     "DELIVERY_BUCKET_SECRET_ACCESS_KEY", os.getenv("BUCKET_SECRET_ACCESS_KEY", "")
 )
 DELIVERY_BUCKET_REGION = os.getenv("DELIVERY_BUCKET_REGION", "auto")
+# Independent Railway bucket used only for disaster recovery. Delivery objects
+# keep exactly the same key in both buckets so a restore never needs path
+# translation.
+DELIVERY_DR_BUCKET_ENDPOINT = os.getenv("DELIVERY_DR_BUCKET_ENDPOINT", "")
+DELIVERY_DR_BUCKET_NAME = os.getenv("DELIVERY_DR_BUCKET_NAME", "")
+DELIVERY_DR_BUCKET_ACCESS_KEY_ID = os.getenv("DELIVERY_DR_BUCKET_ACCESS_KEY_ID", "")
+DELIVERY_DR_BUCKET_SECRET_ACCESS_KEY = os.getenv("DELIVERY_DR_BUCKET_SECRET_ACCESS_KEY", "")
+DELIVERY_DR_BUCKET_REGION = os.getenv("DELIVERY_DR_BUCKET_REGION", "auto")
 DELIVERY_UPLOAD_MAX_BYTES = max(1, int(os.getenv("DELIVERY_UPLOAD_MAX_MB", "12"))) * 1024 * 1024
 DELIVERY_SIGNED_URL_SECONDS = min(
     3600, max(60, int(os.getenv("DELIVERY_SIGNED_URL_SECONDS", "600")))

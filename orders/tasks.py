@@ -7,8 +7,22 @@ from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
-from .delivery_storage import create_metadata_backup, delete_object, is_configured
-from .models import DeliveryAsset, DeliveryBackup, ServiceControl, SyncRun, SystemLog
+from .delivery_storage import (
+    create_metadata_backup,
+    delete_object,
+    dr_is_configured,
+    is_configured,
+    replicate_asset,
+    verify_asset_replica,
+)
+from .models import (
+    DeliveryAsset,
+    DeliveryAssetReplica,
+    DeliveryBackup,
+    ServiceControl,
+    SyncRun,
+    SystemLog,
+)
 from .services import reconcile_monthly_needs, reconcile_stocks, sync_products, sync_receipts, sync_stocks, sync_stores
 
 logger = logging.getLogger(__name__)
@@ -240,9 +254,9 @@ def dispatch_waiting_monthly_reconciliation():
 
 @shared_task(name="orders.tasks.backup_delivery_metadata_task")
 def backup_delivery_metadata_task():
-    """Create a daily searchable metadata catalog beside the delivery objects."""
-    if not is_configured():
-        return {"skipped": True, "reason": "delivery bucket is not configured"}
+    """Create a daily searchable metadata catalog in independent DR storage."""
+    if not dr_is_configured():
+        return {"skipped": True, "reason": "delivery DR bucket is not configured"}
     backup = DeliveryBackup.objects.create()
     try:
         key, delivery_count, asset_count, size_bytes = create_metadata_backup(backup)
@@ -267,6 +281,77 @@ def backup_delivery_metadata_task():
             level="ERROR", source="delivery.backup", message=backup.error_message
         )
         raise
+
+
+@shared_task(bind=True, name="orders.tasks.replicate_delivery_asset_task", max_retries=5)
+def replicate_delivery_asset_task(self, asset_id):
+    """Copy a confirmed immutable asset to DR and retry transient failures."""
+    try:
+        asset = DeliveryAsset.objects.select_related("delivery").get(
+            pk=asset_id, upload_status=DeliveryAsset.UploadStatus.UPLOADED
+        )
+    except DeliveryAsset.DoesNotExist:
+        return {"skipped": True, "reason": "uploaded asset no longer exists"}
+    try:
+        replica = replicate_asset(asset)
+        return {
+            "asset_uuid": str(asset.uuid),
+            "status": replica.status,
+            "size_bytes": replica.size_bytes,
+            "checksum_sha256": replica.checksum_sha256,
+        }
+    except Exception as exc:
+        logger.exception("Delivery asset replication failed for %s", asset.uuid)
+        countdown = min(3600, 30 * (2 ** self.request.retries))
+        raise self.retry(exc=exc, countdown=countdown)
+
+
+@shared_task(name="orders.tasks.verify_delivery_replica_task")
+def verify_delivery_replica_task(replica_id):
+    try:
+        replica = DeliveryAssetReplica.objects.get(pk=replica_id)
+    except DeliveryAssetReplica.DoesNotExist:
+        return {"skipped": True, "reason": "replica record no longer exists"}
+    checked = verify_asset_replica(replica)
+    return {"asset_uuid": str(checked.asset.uuid), "status": checked.status}
+
+
+@shared_task(name="orders.tasks.reconcile_delivery_replicas_task")
+def reconcile_delivery_replicas_task():
+    """Catch missed jobs and periodically prove that recovery copies still exist."""
+    if not is_configured() or not dr_is_configured():
+        return {"skipped": True, "reason": "both delivery buckets must be configured"}
+    copying_cutoff = timezone.now() - timedelta(minutes=30)
+    unsynced = list(
+        DeliveryAsset.objects.filter(upload_status=DeliveryAsset.UploadStatus.UPLOADED)
+        .filter(
+            Q(replica__isnull=True)
+            | Q(
+                replica__status=DeliveryAssetReplica.Status.COPYING,
+                replica__updated_at__lt=copying_cutoff,
+            )
+            | Q(
+                replica__status__in=[
+                    DeliveryAssetReplica.Status.PENDING,
+                    DeliveryAssetReplica.Status.FAILED,
+                    DeliveryAssetReplica.Status.MISSING,
+                ]
+            )
+        )
+        .values_list("pk", flat=True)[:200]
+    )
+    for asset_id in unsynced:
+        replicate_delivery_asset_task.delay(asset_id)
+
+    verify_before = timezone.now() - timedelta(days=7)
+    stale = list(
+        DeliveryAssetReplica.objects.filter(status=DeliveryAssetReplica.Status.VERIFIED)
+        .filter(Q(verified_at__lt=verify_before) | Q(verified_at__isnull=True))
+        .values_list("pk", flat=True)[:200]
+    )
+    for replica_id in stale:
+        verify_delivery_replica_task.delay(replica_id)
+    return {"replication_queued": len(unsynced), "verification_queued": len(stale)}
 
 
 @shared_task(name="orders.tasks.cleanup_abandoned_delivery_uploads_task")

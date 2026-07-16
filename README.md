@@ -7,7 +7,7 @@ S2U Orders is a Django and Django REST Framework order-management application fo
 - Django and Django REST Framework provide the web application and API.
 - PostgreSQL stores users, order lists, cached KORONA data, stock, and rolling sales totals.
 - Redis is the Celery broker and result backend.
-- Railway Object Storage keeps private delivery-proof photos independently of application deploys.
+- Two independent Railway Object Storage buckets keep live delivery proof and verified disaster-recovery copies independently of application deploys.
 - Celery Worker runs synchronization jobs.
 - Celery Beat schedules KORONA stores, products, stocks, and receipts synchronization.
 - Docker Compose provides an isolated local development environment.
@@ -105,6 +105,8 @@ Set the variables from `.env.example` on every service. Set `RUN_MIGRATIONS=1` o
 
 ### Delivery proof storage
 
-Create a private Railway Bucket named `s2u-delivery-proofs`, then inject its S3-compatible credentials into the Web, Worker, and Beat services using the `DELIVERY_BUCKET_*` variables in `.env.example`. Configure bucket CORS to allow `PUT` from the production application origin with the `Content-Type` header. The browser resizes delivery images and uploads them through short-lived signed URLs; the bucket remains private.
+Create two private Railway Buckets named `s2u-delivery-proofs` and `s2u-delivery-proofs-dr`. Inject the live bucket credentials with `DELIVERY_BUCKET_*` and the recovery bucket credentials with `DELIVERY_DR_BUCKET_*` into Web, Worker, and Beat. The application rejects a DR configuration that points back to the live bucket. Only the live bucket needs browser CORS allowing `PUT` from the production application origin with the `Content-Type` header; both buckets remain private.
 
-Objects are organized as `deliveries/YYYY/MM/DD/store-NUMBER/delivery-UUID/{invoice,boxes,damage,notes}/`. PostgreSQL stores searchable metadata, verification state, keywords, checksums, and the audit trail. A nightly task writes a compressed metadata catalog under `backups/delivery-metadata/`; administrators can also create and download one from the verification workspace. Keep Railway PostgreSQL backups enabled because metadata catalogs complement rather than replace database backups.
+Every confirmed photo and immutable notes snapshot is copied by the worker and stored under the same `deliveries/YYYY/MM/DD/store-NUMBER/delivery-UUID/{invoice,boxes,damage,notes}/` path in both buckets. Each copy is verified by size and SHA-256; a 15-minute reconciliation repairs missed/failed jobs and a weekly integrity pass confirms recovery objects still exist. Photo viewing and ZIP downloads can fall back to the verified DR copy when the live object is unavailable.
+
+PostgreSQL stores searchable metadata, replication state, keywords, checksums, and the audit trail. Nightly compressed metadata catalogs are written only to the DR bucket under `backups/delivery-metadata/YYYY/MM/DD/`; administrators can create/download a catalog, inspect recovery coverage, and retry unsynced files from the verification workspace. Keep Railway PostgreSQL backups enabled because DR object replication protects files, while database backups protect relational state.
