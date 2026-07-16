@@ -481,8 +481,8 @@ function restorePreference() {
   }
 }
 
-async function searchProducts(selectBestMatch = false) {
-  const query = searchInput.value.trim();
+async function searchProducts(selectBestMatch = false, queryOverride = null) {
+  const query = (queryOverride ?? searchInput.value).trim();
   const fromCamera = cameraScanPending; cameraScanPending = false;
   const requestId = ++searchRequestId;
   suggestionIndex = -1;
@@ -552,6 +552,15 @@ searchInput.addEventListener('keydown', event => {
       return;
     }
     if (batchSelectedProducts.size) { document.getElementById('add-batch-selection').click(); return; }
+    const scannedBarcode = searchInput.value.trim();
+    if (barcodeVariants(scannedBarcode).size) {
+      // Hardware scanners send Enter after each code. Clear the field before
+      // looking it up so a following fast scan cannot append to this barcode.
+      searchInput.value = '';
+      suggestionProducts = []; suggestionIndex = -1; searchResults.hidden = true;
+      searchProducts(false, scannedBarcode);
+      return;
+    }
     if (selectedProduct) { quickAddSelected(); return; }
     if (keyboardSelectionPending) { quickAddAfterSearch = true; return; }
     if (suggestionProducts.length) { chooseProduct(suggestionProducts[suggestionIndex >= 0 ? suggestionIndex : 0]); return; }
