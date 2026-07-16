@@ -5,10 +5,11 @@ const reviewDecisions = ['under_review', 'needs_info', 'issue_found', 'verified'
 let deliveries = [];
 let statuses = [];
 let exportPoll;
-let lightboxPhotos = [];
-let lightboxIndex = 0;
-let lightboxZoom = 1;
-let touchStartX = null;
+const comparePanes = {
+  invoice: {category: 'invoice', assets: [], index: 0, zoom: 1, pointer: null},
+  evidence: {category: 'boxes', assets: [], index: 0, zoom: 1, pointer: null},
+};
+let activeComparePane = 'invoice';
 
 function filterParams() {
   const result = new URLSearchParams({inline: '1'});
@@ -130,35 +131,81 @@ document.getElementById('clear-review-filters').addEventListener('click', () => 
 const lightbox = document.getElementById('review-lightbox');
 function openGallery(deliveryId, category, categoryIndex) {
   const delivery = deliveries.find(item => item.uuid === deliveryId);
-  lightboxPhotos = ['invoice', 'boxes', 'damage'].flatMap(type => uploadedAssets(delivery, type));
-  const target = uploadedAssets(delivery, category)[categoryIndex];
-  lightboxIndex = Math.max(0, lightboxPhotos.findIndex(item => item.uuid === target.uuid));
-  lightboxZoom = 1; renderLightbox(); lightbox.showModal();
+  comparePanes.invoice.assets = uploadedAssets(delivery, 'invoice');
+  comparePanes.invoice.index = category === 'invoice' ? categoryIndex : 0;
+  comparePanes.invoice.zoom = 1;
+  comparePanes.evidence.category = category === 'damage' ? 'damage' : 'boxes';
+  comparePanes.evidence.assets = uploadedAssets(delivery, comparePanes.evidence.category);
+  comparePanes.evidence.index = category === comparePanes.evidence.category ? categoryIndex : 0;
+  comparePanes.evidence.zoom = 1;
+  activeComparePane = category === 'invoice' ? 'invoice' : 'evidence';
+  document.getElementById('compare-gallery-title').textContent = comparePanes.evidence.category === 'damage' ? 'Invoice and damage evidence' : 'Invoice and received cases';
+  renderComparePane('invoice', true); renderComparePane('evidence', true); lightbox.showModal();
 }
-function renderLightbox() {
-  const asset = lightboxPhotos[lightboxIndex];
-  const image = document.getElementById('gallery-image');
-  image.src = asset.view_url; image.style.transform = `scale(${lightboxZoom})`;
-  document.getElementById('gallery-title').textContent = asset.filename;
-  document.getElementById('gallery-category').textContent = `${asset.category.toUpperCase()} · ${lightboxIndex + 1} OF ${lightboxPhotos.length}`;
-  document.getElementById('gallery-caption').textContent = `${formatBytes(asset.size_bytes)} · ${asset.replica_status === 'verified' ? 'Integrity-verified DR copy available' : 'DR copy syncing'}`;
-  document.getElementById('gallery-original').href = asset.view_url;
-  document.getElementById('gallery-zoom-reset').textContent = `${Math.round(lightboxZoom * 100)}%`;
-  document.getElementById('gallery-thumbnails').innerHTML = lightboxPhotos.map((item, index) => `<button type="button" data-lightbox-index="${index}" class="${index === lightboxIndex ? 'active' : ''}"><img src="${item.view_url}" alt="Proof thumbnail ${index + 1}"><span>${item.category}</span></button>`).join('');
+function comparePaneElement(name) { return lightbox.querySelector(`[data-compare-pane="${name}"]`); }
+function centerComparePane(name) {
+  const scroll = comparePaneElement(name).querySelector('[data-compare-scroll]');
+  scroll.scrollLeft = (scroll.scrollWidth - scroll.clientWidth) / 2;
+  scroll.scrollTop = (scroll.scrollHeight - scroll.clientHeight) / 2;
 }
-function moveGallery(amount) { lightboxIndex = (lightboxIndex + amount + lightboxPhotos.length) % lightboxPhotos.length; lightboxZoom = 1; renderLightbox(); }
-function zoomGallery(amount) { lightboxZoom = Math.max(1, Math.min(4, lightboxZoom + amount)); renderLightbox(); }
+function updateCompareZoom(name, nextZoom, resetPosition = false) {
+  const state = comparePanes[name], pane = comparePaneElement(name), scroll = pane.querySelector('[data-compare-scroll]');
+  const oldMaxX = Math.max(1, scroll.scrollWidth - scroll.clientWidth), oldMaxY = Math.max(1, scroll.scrollHeight - scroll.clientHeight);
+  const xRatio = scroll.scrollLeft / oldMaxX, yRatio = scroll.scrollTop / oldMaxY;
+  state.zoom = Math.max(1, Math.min(5, Math.round(nextZoom * 2) / 2));
+  pane.querySelector('[data-compare-image]').style.transform = `scale(${state.zoom})`;
+  pane.querySelector('[data-compare-zoom-reset]').textContent = `${Math.round(state.zoom * 100)}%`;
+  pane.querySelector('[data-compare-zoom-out]').disabled = state.zoom === 1;
+  pane.querySelector('[data-compare-zoom-in]').disabled = state.zoom === 5;
+  scroll.classList.toggle('zoomed', state.zoom > 1);
+  requestAnimationFrame(() => {
+    if (resetPosition) { centerComparePane(name); return; }
+    scroll.scrollLeft = xRatio * Math.max(0, scroll.scrollWidth - scroll.clientWidth);
+    scroll.scrollTop = yRatio * Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+  });
+}
+function renderComparePane(name, resetPosition = false) {
+  const state = comparePanes[name], pane = comparePaneElement(name), asset = state.assets[state.index];
+  const image = pane.querySelector('[data-compare-image]'), empty = pane.querySelector('[data-compare-empty]'), original = pane.querySelector('[data-compare-original]');
+  if (name === 'evidence') pane.querySelector('[data-compare-side-label]').textContent = state.category === 'damage' ? 'RIGHT · DAMAGE EVIDENCE' : 'RIGHT · RECEIVED CASES';
+  pane.classList.toggle('active', activeComparePane === name);
+  image.hidden = !asset; empty.hidden = Boolean(asset); original.hidden = !asset;
+  pane.querySelector('[data-compare-filename]').textContent = asset?.filename || (name === 'invoice' ? 'No invoice photos' : state.category === 'damage' ? 'No damage photos' : 'No box photos');
+  pane.querySelector('[data-compare-position]').textContent = asset ? `${state.index + 1} / ${state.assets.length}` : '0 / 0';
+  pane.querySelector('[data-compare-previous]').disabled = state.assets.length < 2;
+  pane.querySelector('[data-compare-next]').disabled = state.assets.length < 2;
+  pane.querySelector('[data-compare-caption]').textContent = asset ? `${formatBytes(asset.size_bytes)} · ${asset.replica_status === 'verified' ? 'Integrity-verified DR copy' : 'DR copy syncing'}` : '';
+  pane.querySelector('[data-compare-thumbnails]').innerHTML = state.assets.map((item, index) => `<button type="button" data-compare-index="${index}" class="${index === state.index ? 'active' : ''}" aria-label="Show ${state.category} photo ${index + 1}"><img src="${item.view_url}" alt=""><span>${index + 1}</span></button>`).join('');
+  if (asset) {
+    original.href = asset.view_url;
+    image.alt = `${state.category} — ${asset.filename}`;
+    if (image.src !== asset.view_url) { image.onload = () => centerComparePane(name); image.src = asset.view_url; }
+  }
+  updateCompareZoom(name, state.zoom, resetPosition);
+  pane.querySelector('[data-compare-zoom-reset]').disabled = !asset;
+  if (!asset) { pane.querySelector('[data-compare-zoom-out]').disabled = true; pane.querySelector('[data-compare-zoom-in]').disabled = true; }
+}
+function selectComparePhoto(name, index) { comparePanes[name].index = index; comparePanes[name].zoom = 1; activeComparePane = name; lightbox.querySelectorAll('[data-compare-pane]').forEach(pane => pane.classList.toggle('active', pane.dataset.comparePane === name)); renderComparePane(name, true); }
+function moveComparePhoto(name, amount) { const state = comparePanes[name]; if (!state.assets.length) return; selectComparePhoto(name, (state.index + amount + state.assets.length) % state.assets.length); }
 document.getElementById('gallery-close').addEventListener('click', () => lightbox.close());
-document.getElementById('gallery-previous').addEventListener('click', () => moveGallery(-1));
-document.getElementById('gallery-next').addEventListener('click', () => moveGallery(1));
-document.getElementById('gallery-zoom-in').addEventListener('click', () => zoomGallery(.5));
-document.getElementById('gallery-zoom-out').addEventListener('click', () => zoomGallery(-.5));
-document.getElementById('gallery-zoom-reset').addEventListener('click', () => { lightboxZoom = 1; renderLightbox(); });
-document.getElementById('gallery-thumbnails').addEventListener('click', event => { const button = event.target.closest('[data-lightbox-index]'); if (button) { lightboxIndex = Number(button.dataset.lightboxIndex); lightboxZoom = 1; renderLightbox(); } });
+lightbox.querySelectorAll('[data-compare-pane]').forEach(pane => {
+  const name = pane.dataset.comparePane, state = comparePanes[name], scroll = pane.querySelector('[data-compare-scroll]'), image = pane.querySelector('[data-compare-image]');
+  pane.addEventListener('pointerdown', () => { activeComparePane = name; lightbox.querySelectorAll('[data-compare-pane]').forEach(item => item.classList.toggle('active', item === pane)); });
+  pane.querySelector('[data-compare-previous]').addEventListener('click', () => moveComparePhoto(name, -1));
+  pane.querySelector('[data-compare-next]').addEventListener('click', () => moveComparePhoto(name, 1));
+  pane.querySelector('[data-compare-zoom-out]').addEventListener('click', () => updateCompareZoom(name, state.zoom - .5));
+  pane.querySelector('[data-compare-zoom-in]').addEventListener('click', () => updateCompareZoom(name, state.zoom + .5));
+  pane.querySelector('[data-compare-zoom-reset]').addEventListener('click', () => updateCompareZoom(name, 1, true));
+  pane.querySelector('[data-compare-thumbnails]').addEventListener('click', event => { const button = event.target.closest('[data-compare-index]'); if (button) selectComparePhoto(name, Number(button.dataset.compareIndex)); });
+  image.addEventListener('dblclick', () => updateCompareZoom(name, state.zoom === 1 ? 2 : 1, true));
+  scroll.addEventListener('wheel', event => { if (!(event.ctrlKey || event.metaKey)) return; event.preventDefault(); updateCompareZoom(name, state.zoom + (event.deltaY < 0 ? .5 : -.5)); }, {passive: false});
+  scroll.addEventListener('pointerdown', event => { if (state.zoom === 1) return; state.pointer = {x: event.clientX, y: event.clientY, left: scroll.scrollLeft, top: scroll.scrollTop}; scroll.setPointerCapture(event.pointerId); scroll.classList.add('dragging'); event.preventDefault(); });
+  scroll.addEventListener('pointermove', event => { if (!state.pointer) return; scroll.scrollLeft = state.pointer.left - (event.clientX - state.pointer.x); scroll.scrollTop = state.pointer.top - (event.clientY - state.pointer.y); });
+  const finishDrag = () => { state.pointer = null; scroll.classList.remove('dragging'); };
+  scroll.addEventListener('pointerup', finishDrag); scroll.addEventListener('pointercancel', finishDrag);
+});
 lightbox.addEventListener('click', event => { if (event.target === lightbox) lightbox.close(); });
-document.getElementById('gallery-stage').addEventListener('touchstart', event => { touchStartX = event.touches[0].clientX; }, {passive: true});
-document.getElementById('gallery-stage').addEventListener('touchend', event => { if (touchStartX == null) return; const change = event.changedTouches[0].clientX - touchStartX; if (Math.abs(change) > 60) moveGallery(change > 0 ? -1 : 1); touchStartX = null; }, {passive: true});
-document.addEventListener('keydown', event => { if (!lightbox.open) return; if (event.key === 'ArrowLeft') moveGallery(-1); if (event.key === 'ArrowRight') moveGallery(1); if (event.key === '+') zoomGallery(.5); if (event.key === '-') zoomGallery(-.5); });
+document.addEventListener('keydown', event => { if (!lightbox.open) return; const state = comparePanes[activeComparePane]; if (event.key === 'ArrowLeft') moveComparePhoto(activeComparePane, -1); if (event.key === 'ArrowRight') moveComparePhoto(activeComparePane, 1); if (event.key === '+' || event.key === '=') updateCompareZoom(activeComparePane, state.zoom + .5); if (event.key === '-') updateCompareZoom(activeComparePane, state.zoom - .5); if (event.key === '0') updateCompareZoom(activeComparePane, 1, true); });
 
 async function loadBackups() {
   const target = document.getElementById('backup-list');

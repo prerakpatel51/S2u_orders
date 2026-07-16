@@ -1671,7 +1671,10 @@ class DeliveryProofTests(TestCase):
         self.assertContains(response, "Recovery and downloads")
         self.assertContains(response, 'class="secondary-button recovery-all-action"')
         self.assertContains(response, "Build full DR ZIP")
-        self.assertContains(response, "delivery_review.js?v=20260716d")
+        self.assertContains(response, 'data-compare-pane="invoice"')
+        self.assertContains(response, 'data-compare-pane="evidence"')
+        self.assertContains(response, 'data-compare-zoom-in')
+        self.assertContains(response, "delivery_review.js?v=20260716e")
 
     def test_worker_can_create_draft_with_notes_and_only_sees_own_deliveries(self):
         response = self.client.post(
