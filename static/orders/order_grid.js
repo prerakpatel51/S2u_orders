@@ -1026,7 +1026,7 @@ async function startCompatibleCameraScanner(status) {
     const formats = window.Html5QrcodeSupportedFormats ? [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.CODE_128] : undefined;
     cameraScanner = new Html5Qrcode('camera-live-reader', formats ? {formatsToSupport: formats, verbose: false} : {verbose: false});
     await cameraScanner.start(
-      {facingMode: {ideal: 'environment'}, width: {ideal: 1920}, height: {ideal: 1080}},
+      {facingMode: 'environment'},
       {fps: 15, disableFlip: true, qrbox: (width, height) => ({width: Math.min(370, Math.floor(width * .9)), height: Math.min(135, Math.floor(height * .34))})},
       async code => {
         if (cameraScanInProgress) return;
