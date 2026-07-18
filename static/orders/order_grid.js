@@ -20,6 +20,13 @@ let cameraScanAttempts = 0;
 let reopenCameraAfterAdd = false;
 let cameraZoomTrack;
 let cameraUsesHardwareZoom = false;
+let cameraZoomMin = 1;
+let cameraZoomMax = 3;
+let cameraZoomStep = 0.1;
+let cameraPinchGesture = null;
+let cameraTorchSupported = false;
+let cameraTorchOn = false;
+let cameraContinuousFocus = false;
 let suggestionIndex = -1;
 let suggestionProducts = [];
 let rawSuggestionProducts = [];
@@ -950,6 +957,16 @@ document.getElementById('camera-button').addEventListener('click', startCamera);
 document.getElementById('camera-close').addEventListener('click', stopCamera);
 document.getElementById('barcode-photo').addEventListener('change', scanBarcodePhoto);
 document.getElementById('camera-zoom').addEventListener('input', updateCameraZoom);
+document.getElementById('camera-zoom-out').addEventListener('click', () => adjustCameraZoom(-1));
+document.getElementById('camera-zoom-in').addEventListener('click', () => adjustCameraZoom(1));
+document.getElementById('camera-torch').addEventListener('click', toggleCameraTorch);
+document.getElementById('camera-dialog').addEventListener('cancel', event => { event.preventDefault(); stopCamera(); });
+const cameraVideoFrame = document.getElementById('camera-video-frame');
+cameraVideoFrame.addEventListener('touchstart', startCameraPinch, {passive: false});
+cameraVideoFrame.addEventListener('touchmove', moveCameraPinch, {passive: false});
+cameraVideoFrame.addEventListener('touchend', endCameraPinch);
+cameraVideoFrame.addEventListener('touchcancel', endCameraPinch);
+window.addEventListener('pagehide', () => { cameraStream?.getTracks().forEach(track => track.stop()); });
 document.getElementById('finalize-order-button')?.addEventListener('click', async event => {
   if (!confirm('Finalize this order list? Regular users will no longer be able to edit it.')) return;
   event.currentTarget.disabled = true;
@@ -974,8 +991,10 @@ async function startCamera() {
   }
   try {
     useNativeCameraView(true);
-    cameraStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: 'environment'}}});
-    const video = document.getElementById('camera-video'); video.srcObject = cameraStream; status.textContent = 'Scanning...';
+    cameraStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: 'environment'}, width: {ideal: 1920}, height: {ideal: 1080}, frameRate: {ideal: 30}}});
+    const video = document.getElementById('camera-video'); video.srcObject = cameraStream;
+    await video.play().catch(() => {});
+    status.textContent = 'Scanning… Pinch or use the controls to zoom.';
     setupCameraZoom(cameraStream.getVideoTracks()[0]);
     cameraScanAttempts = 0;
     const detector = new BarcodeDetector({formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128']});
@@ -1007,8 +1026,8 @@ async function startCompatibleCameraScanner(status) {
     const formats = window.Html5QrcodeSupportedFormats ? [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.CODE_128] : undefined;
     cameraScanner = new Html5Qrcode('camera-live-reader', formats ? {formatsToSupport: formats, verbose: false} : {verbose: false});
     await cameraScanner.start(
-      {facingMode: 'environment'},
-      {fps: 10, qrbox: (width, height) => ({width: Math.min(300, Math.floor(width * .86)), height: Math.min(150, Math.floor(height * .45))})},
+      {facingMode: {ideal: 'environment'}, width: {ideal: 1920}, height: {ideal: 1080}},
+      {fps: 15, disableFlip: true, qrbox: (width, height) => ({width: Math.min(370, Math.floor(width * .9)), height: Math.min(135, Math.floor(height * .34))})},
       async code => {
         if (cameraScanInProgress) return;
         cameraScanInProgress = true;
@@ -1017,7 +1036,8 @@ async function startCompatibleCameraScanner(status) {
       },
       () => {}
     );
-    status.textContent = 'Scanning…';
+    setupCameraZoom(null);
+    status.textContent = 'Scanning… Pinch or use the controls to zoom.';
   } catch (error) {
     await clearCompatibleCameraScanner();
     status.textContent = cameraErrorMessage(error);
@@ -1037,11 +1057,11 @@ async function handleDetectedCameraCode(code, status) {
 function useNativeCameraView(native) {
   document.getElementById('camera-video').hidden = !native;
   document.getElementById('camera-live-reader').hidden = native;
-  document.querySelector('.camera-zoom-control').hidden = !native;
 }
 function cameraErrorMessage(error) {
-  if (error?.name === 'NotAllowedError') return 'Camera access was blocked. On iPhone, open Settings › Safari › Camera and allow access, then try again.';
-  if (error?.name === 'NotFoundError') return 'No rear camera was found. Use “Take barcode photo” below instead.';
+  const detail = String(error?.message || error || '').toLowerCase();
+  if (error?.name === 'NotAllowedError' || detail.includes('permission') || detail.includes('notallowed')) return 'Camera access was blocked. On iPhone, open Settings › Safari › Camera and allow access, then try again.';
+  if (error?.name === 'NotFoundError' || detail.includes('not found') || detail.includes('notfound')) return 'No rear camera was found. Use “Take barcode photo” below instead.';
   return `Camera unavailable: ${error?.message || error}`;
 }
 async function scanBarcodePhoto(event) {
@@ -1055,15 +1075,90 @@ async function scanBarcodePhoto(event) {
   } catch (_) { status.textContent = 'No barcode found. Try again with the barcode centered and in good light.'; event.target.value = ''; }
 }
 function setupCameraZoom(track) {
-  const slider = document.getElementById('camera-zoom'); const capabilities = track?.getCapabilities?.() || {};
-  cameraZoomTrack = track; cameraUsesHardwareZoom = Boolean(capabilities.zoom);
-  slider.min = cameraUsesHardwareZoom ? capabilities.zoom.min : 1; slider.max = cameraUsesHardwareZoom ? capabilities.zoom.max : 3; slider.step = cameraUsesHardwareZoom ? capabilities.zoom.step || 0.1 : 0.1; slider.value = cameraUsesHardwareZoom ? capabilities.zoom.min : 1;
+  const slider = document.getElementById('camera-zoom');
+  let capabilities = {}; let settings = {};
+  try { capabilities = track?.getCapabilities?.() || cameraScanner?.getRunningTrackCapabilities?.() || {}; } catch (_) {}
+  try { settings = track?.getSettings?.() || cameraScanner?.getRunningTrackSettings?.() || {}; } catch (_) {}
+  cameraZoomTrack = track;
+  cameraUsesHardwareZoom = Boolean(capabilities.zoom && Number.isFinite(Number(capabilities.zoom.min)) && Number.isFinite(Number(capabilities.zoom.max)));
+  cameraZoomMin = cameraUsesHardwareZoom ? Number(capabilities.zoom.min) : 1;
+  cameraZoomMax = cameraUsesHardwareZoom ? Number(capabilities.zoom.max) : 3;
+  cameraZoomStep = cameraUsesHardwareZoom ? Number(capabilities.zoom.step || 0.1) : 0.1;
+  slider.min = cameraZoomMin; slider.max = cameraZoomMax; slider.step = cameraZoomStep;
+  slider.value = cameraUsesHardwareZoom && Number.isFinite(Number(settings.zoom)) ? settings.zoom : cameraZoomMin;
+  cameraTorchSupported = capabilities.torch === true;
+  cameraTorchOn = false;
+  cameraContinuousFocus = Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous');
+  const torchButton = document.getElementById('camera-torch');
+  torchButton.hidden = !cameraTorchSupported; torchButton.setAttribute('aria-pressed', 'false');
   updateCameraZoom();
 }
+function clampCameraZoom(value) { return Math.max(cameraZoomMin, Math.min(cameraZoomMax, value)); }
+function updateCameraZoomDisplay(value) {
+  const decimals = Math.abs(value - Math.round(value)) < .01 ? 0 : 1;
+  document.getElementById('camera-zoom-value').textContent = `${value.toFixed(decimals)}×`;
+  document.getElementById('camera-zoom-out').disabled = value <= cameraZoomMin + .001;
+  document.getElementById('camera-zoom-in').disabled = value >= cameraZoomMax - .001;
+}
+function applyCameraPreviewScale(value) {
+  const scale = cameraUsesHardwareZoom ? 1 : value;
+  document.getElementById('camera-video').style.transform = `scale(${scale})`;
+  const compatibleVideo = document.querySelector('#camera-live-reader video');
+  if (compatibleVideo) compatibleVideo.style.transform = `scale(${scale})`;
+}
+async function applyCameraConstraints(values) {
+  const preferred = {...values};
+  if (cameraContinuousFocus && preferred.focusMode === undefined) preferred.focusMode = 'continuous';
+  if (cameraUsesHardwareZoom && preferred.zoom === undefined) preferred.zoom = Number(document.getElementById('camera-zoom').value);
+  if (cameraTorchSupported && preferred.torch === undefined) preferred.torch = cameraTorchOn;
+  const constraints = {advanced: [preferred]};
+  if (cameraZoomTrack) return cameraZoomTrack.applyConstraints(constraints);
+  if (cameraScanner?.applyVideoConstraints) return cameraScanner.applyVideoConstraints(constraints);
+  throw new Error('No active camera track');
+}
 async function updateCameraZoom() {
-  const slider = document.getElementById('camera-zoom'); const value = Number(slider.value || 1); document.getElementById('camera-zoom-value').textContent = `${value.toFixed(value % 1 ? 1 : 0)}×`;
-  if (cameraUsesHardwareZoom && cameraZoomTrack) { try { await cameraZoomTrack.applyConstraints({advanced: [{zoom: value}]}); } catch (_) {} }
-  else document.getElementById('camera-video').style.transform = `scale(${value})`;
+  const slider = document.getElementById('camera-zoom');
+  const value = clampCameraZoom(Number(slider.value || cameraZoomMin));
+  slider.value = value; updateCameraZoomDisplay(value); applyCameraPreviewScale(value);
+  if (cameraUsesHardwareZoom) {
+    try { await applyCameraConstraints({zoom: value}); }
+    catch (_) {
+      document.getElementById('camera-video').style.transform = `scale(${value})`;
+      const compatibleVideo = document.querySelector('#camera-live-reader video');
+      if (compatibleVideo) compatibleVideo.style.transform = `scale(${value})`;
+    }
+  }
+}
+function adjustCameraZoom(direction) {
+  const slider = document.getElementById('camera-zoom');
+  const buttonStep = Math.max(cameraZoomStep, (cameraZoomMax - cameraZoomMin) / 8, .25);
+  slider.value = clampCameraZoom(Number(slider.value) + direction * buttonStep);
+  updateCameraZoom();
+}
+function cameraTouchDistance(touches) { return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY); }
+function startCameraPinch(event) {
+  if (event.touches.length !== 2) return;
+  cameraPinchGesture = {distance: cameraTouchDistance(event.touches), zoom: Number(document.getElementById('camera-zoom').value)};
+  event.preventDefault();
+}
+function moveCameraPinch(event) {
+  if (!cameraPinchGesture || event.touches.length !== 2) return;
+  const distance = cameraTouchDistance(event.touches);
+  if (!cameraPinchGesture.distance) return;
+  const slider = document.getElementById('camera-zoom');
+  slider.value = clampCameraZoom(cameraPinchGesture.zoom * distance / cameraPinchGesture.distance);
+  updateCameraZoom(); event.preventDefault();
+}
+function endCameraPinch(event) { if (event.touches.length < 2) cameraPinchGesture = null; }
+async function toggleCameraTorch() {
+  if (!cameraTorchSupported) return;
+  const next = !cameraTorchOn;
+  try {
+    await applyCameraConstraints({torch: next}); cameraTorchOn = next;
+    document.getElementById('camera-torch').setAttribute('aria-pressed', String(next));
+  } catch (_) {
+    cameraTorchSupported = false; document.getElementById('camera-torch').hidden = true;
+  }
 }
 async function clearCompatibleCameraScanner() {
   const scanner = cameraScanner; cameraScanner = null;
@@ -1074,8 +1169,10 @@ async function clearCompatibleCameraScanner() {
 async function stopCamera() {
   cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null;
   await clearCompatibleCameraScanner();
-  cameraScanInProgress = false; cameraZoomTrack = null; cameraUsesHardwareZoom = false;
+  cameraScanInProgress = false; cameraZoomTrack = null; cameraUsesHardwareZoom = false; cameraPinchGesture = null; cameraTorchSupported = false; cameraTorchOn = false; cameraContinuousFocus = false;
   const video=document.getElementById('camera-video'); video.srcObject = null; video.style.transform='scale(1)';
+  document.getElementById('camera-torch').hidden = true;
+  const compatibleVideo = document.querySelector('#camera-live-reader video'); if (compatibleVideo) compatibleVideo.style.transform = 'scale(1)';
   const dialog = document.getElementById('camera-dialog'); if (dialog.open) dialog.close();
 }
 
