@@ -1027,7 +1027,7 @@ async function startCompatibleCameraScanner(status) {
     cameraScanner = new Html5Qrcode('camera-live-reader', formats ? {formatsToSupport: formats, verbose: false} : {verbose: false});
     await cameraScanner.start(
       {facingMode: 'environment'},
-      {fps: 15, disableFlip: true, qrbox: (width, height) => ({width: Math.min(370, Math.floor(width * .9)), height: Math.min(135, Math.floor(height * .34))})},
+      {fps: 10, disableFlip: true},
       async code => {
         if (cameraScanInProgress) return;
         cameraScanInProgress = true;
@@ -1036,11 +1036,26 @@ async function startCompatibleCameraScanner(status) {
       },
       () => {}
     );
+    await optimizeCompatibleCameraTrack();
     setupCameraZoom(null);
     status.textContent = 'Scanning… Pinch or use the controls to zoom.';
   } catch (error) {
     await clearCompatibleCameraScanner();
     status.textContent = cameraErrorMessage(error);
+  }
+}
+async function optimizeCompatibleCameraTrack() {
+  if (!cameraScanner?.applyVideoConstraints) return;
+  let capabilities = {};
+  try { capabilities = cameraScanner.getRunningTrackCapabilities?.() || {}; } catch (_) {}
+  const continuousFocus = Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous');
+  const constraints = {width: {ideal: 1280}, height: {ideal: 720}};
+  if (continuousFocus) constraints.advanced = [{focusMode: 'continuous'}];
+  try { await cameraScanner.applyVideoConstraints(constraints); }
+  catch (_) {
+    if (continuousFocus) {
+      try { await cameraScanner.applyVideoConstraints({advanced: [{focusMode: 'continuous'}]}); } catch (_) {}
+    }
   }
 }
 async function handleDetectedCameraCode(code, status) {
@@ -1092,6 +1107,7 @@ function setupCameraZoom(track) {
   const torchButton = document.getElementById('camera-torch');
   torchButton.hidden = !cameraTorchSupported; torchButton.setAttribute('aria-pressed', 'false');
   updateCameraZoom();
+  if (cameraContinuousFocus && !cameraUsesHardwareZoom) applyCameraConstraints({focusMode: 'continuous'}).catch(() => {});
 }
 function clampCameraZoom(value) { return Math.max(cameraZoomMin, Math.min(cameraZoomMax, value)); }
 function updateCameraZoomDisplay(value) {
