@@ -50,7 +50,10 @@ function clearError() { errorBox.hidden = true; errorBox.textContent = ''; }
 
 document.querySelectorAll('[data-photo-input]').forEach(input => input.addEventListener('change', event => {
   const category = input.dataset.photoInput;
-  [...event.target.files].forEach(file => { if (file.type.startsWith('image/')) files[category].push({id: crypto.randomUUID(), file, url: URL.createObjectURL(file)}); });
+  [...event.target.files].forEach(file => {
+    const looksLikeImage = file.type.startsWith('image/') || /\.(?:avif|heic|heif|jpe?g|png|webp)$/i.test(file.name);
+    if (looksLikeImage) files[category].push({id: crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`, file, url: URL.createObjectURL(file)});
+  });
   input.value = ''; renderPreviews(category);
 }));
 
@@ -72,15 +75,27 @@ function payload() {
 async function prepareImage(file) {
   const supported = ['image/jpeg', 'image/png', 'image/webp'].includes(file.type);
   if (supported && file.size <= uploadMaxBytes) return file;
-  const bitmap = await createImageBitmap(file);
-  const maxSide = 4096; const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement('canvas'); canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
-  const context = canvas.getContext('2d', {alpha: false}); context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
+  const decoded = await decodeImage(file);
+  const maxSide = 4096; const scale = Math.min(1, maxSide / Math.max(decoded.width, decoded.height));
+  const canvas = document.createElement('canvas'); canvas.width = Math.round(decoded.width * scale); canvas.height = Math.round(decoded.height * scale);
+  const context = canvas.getContext('2d', {alpha: false}); context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(decoded.source, 0, 0, canvas.width, canvas.height); decoded.close();
   const encode = quality => new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Could not prepare an image.')), 'image/jpeg', quality));
   let blob = await encode(.94);
   if (blob.size > uploadMaxBytes) blob = await encode(.88);
   if (blob.size > uploadMaxBytes) throw new Error(`This photo is still larger than ${Math.round(uploadMaxBytes / 1024 / 1024)} MB after high-quality preparation.`);
   return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', {type: 'image/jpeg'});
+}
+
+async function decodeImage(file) {
+  if ('createImageBitmap' in window) {
+    try { const bitmap = await createImageBitmap(file, {imageOrientation: 'from-image'}); return {source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close()}; }
+    catch (_) {}
+  }
+  const url = URL.createObjectURL(file); const image = new Image();
+  try {
+    await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error('This iPhone photo format could not be read. In Settings › Camera › Formats, choose Most Compatible and take the photo again.')); image.src = url; });
+    return {source: image, width: image.naturalWidth, height: image.naturalHeight, close: () => URL.revokeObjectURL(url)};
+  } catch (error) { URL.revokeObjectURL(url); throw error; }
 }
 
 async function checksum(blob) { const bytes = await blob.arrayBuffer(); const hash = await crypto.subtle.digest('SHA-256', bytes); return [...new Uint8Array(hash)].map(value => value.toString(16).padStart(2, '0')).join(''); }

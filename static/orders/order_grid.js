@@ -13,6 +13,7 @@ let searchTimer;
 let preferenceTimer;
 let showingOtherStores = false;
 let cameraStream;
+let cameraScanner;
 let cameraScanPending = false;
 let cameraScanInProgress = false;
 let cameraScanAttempts = 0;
@@ -962,10 +963,17 @@ document.getElementById('delete-order-button')?.addEventListener('click', async 
   catch (error) { event.currentTarget.disabled = false; showToast(error.message, true); }
 });
 async function startCamera() {
-  const dialog = document.getElementById('camera-dialog'); const status = document.getElementById('camera-status'); dialog.showModal();
+  const dialog = document.getElementById('camera-dialog'); const status = document.getElementById('camera-status');
+  if (!dialog.open) dialog.showModal();
+  status.textContent = 'Starting camera…';
   if (!window.isSecureContext && location.hostname !== 'localhost') { status.textContent = 'Live preview needs HTTPS on phones. Use “Take photo” below instead.'; return; }
-  if (!('BarcodeDetector' in window)) { status.textContent = 'Live scanning is not supported here. Use “Take photo” below instead.'; return; }
+  if (!navigator.mediaDevices?.getUserMedia) { status.textContent = 'This browser cannot open a live camera. Use “Take barcode photo” below instead.'; return; }
+  if (!('BarcodeDetector' in window)) {
+    await startCompatibleCameraScanner(status);
+    return;
+  }
   try {
+    useNativeCameraView(true);
     cameraStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: 'environment'}}});
     const video = document.getElementById('camera-video'); video.srcObject = cameraStream; status.textContent = 'Scanning...';
     setupCameraZoom(cameraStream.getVideoTracks()[0]);
@@ -978,18 +986,7 @@ async function startCamera() {
         const codes = await detector.detect(video);
         cameraScanAttempts += 1;
         if (codes.length) {
-          const code = codes[0].rawValue;
-          status.textContent = 'Checking barcode…';
-          const products = await apiFetch(`/api/products/search/?q=${encodeURIComponent(code)}&order_id=${window.ORDER_LIST_ID}`);
-          const product = exactBarcodeProduct(products, code);
-          if (product) {
-            searchInput.value = code;
-            stopCamera();
-            await chooseProduct(product, {reopenCamera: true});
-            document.getElementById('selected-on-shelf').focus();
-            return;
-          }
-          status.textContent = 'That barcode was not recognized. Keep it centered and we will keep trying.';
+          if (await handleDetectedCameraCode(codes[0].rawValue, status)) return;
         } else if (cameraScanAttempts % 60 === 0) {
           status.textContent = 'Still scanning — hold the barcode steady in good light.';
         }
@@ -1001,7 +998,51 @@ async function startCamera() {
       if (cameraStream) setTimeout(() => requestAnimationFrame(scan), 180);
     };
     scan();
-  } catch (error) { status.textContent = `Camera unavailable: ${error.message}`; }
+  } catch (error) { status.textContent = cameraErrorMessage(error); }
+}
+async function startCompatibleCameraScanner(status) {
+  if (!window.Html5Qrcode) { status.textContent = 'The iPhone-compatible scanner did not load. Check your connection or use “Take barcode photo” below.'; return; }
+  useNativeCameraView(false);
+  try {
+    const formats = window.Html5QrcodeSupportedFormats ? [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.CODE_128] : undefined;
+    cameraScanner = new Html5Qrcode('camera-live-reader', formats ? {formatsToSupport: formats, verbose: false} : {verbose: false});
+    await cameraScanner.start(
+      {facingMode: 'environment'},
+      {fps: 10, qrbox: (width, height) => ({width: Math.min(300, Math.floor(width * .86)), height: Math.min(150, Math.floor(height * .45))})},
+      async code => {
+        if (cameraScanInProgress) return;
+        cameraScanInProgress = true;
+        try { await handleDetectedCameraCode(code, status); }
+        finally { cameraScanInProgress = false; }
+      },
+      () => {}
+    );
+    status.textContent = 'Scanning…';
+  } catch (error) {
+    await clearCompatibleCameraScanner();
+    status.textContent = cameraErrorMessage(error);
+  }
+}
+async function handleDetectedCameraCode(code, status) {
+  status.textContent = 'Checking barcode…';
+  const products = await apiFetch(`/api/products/search/?q=${encodeURIComponent(code)}&order_id=${window.ORDER_LIST_ID}`);
+  const product = exactBarcodeProduct(products, code);
+  if (!product) { status.textContent = 'That barcode was not recognized. Keep it centered and we will keep trying.'; return false; }
+  searchInput.value = code;
+  await stopCamera();
+  await chooseProduct(product, {reopenCamera: true});
+  document.getElementById('selected-on-shelf').focus();
+  return true;
+}
+function useNativeCameraView(native) {
+  document.getElementById('camera-video').hidden = !native;
+  document.getElementById('camera-live-reader').hidden = native;
+  document.querySelector('.camera-zoom-control').hidden = !native;
+}
+function cameraErrorMessage(error) {
+  if (error?.name === 'NotAllowedError') return 'Camera access was blocked. On iPhone, open Settings › Safari › Camera and allow access, then try again.';
+  if (error?.name === 'NotFoundError') return 'No rear camera was found. Use “Take barcode photo” below instead.';
+  return `Camera unavailable: ${error?.message || error}`;
 }
 async function scanBarcodePhoto(event) {
   const file = event.target.files?.[0]; if (!file) return;
@@ -1024,7 +1065,19 @@ async function updateCameraZoom() {
   if (cameraUsesHardwareZoom && cameraZoomTrack) { try { await cameraZoomTrack.applyConstraints({advanced: [{zoom: value}]}); } catch (_) {} }
   else document.getElementById('camera-video').style.transform = `scale(${value})`;
 }
-function stopCamera() { cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null; cameraScanInProgress = false; cameraZoomTrack = null; cameraUsesHardwareZoom = false; const video=document.getElementById('camera-video'); video.style.transform='scale(1)'; document.getElementById('camera-dialog').close(); }
+async function clearCompatibleCameraScanner() {
+  const scanner = cameraScanner; cameraScanner = null;
+  if (!scanner) return;
+  try { await scanner.stop(); } catch (_) {}
+  try { scanner.clear(); } catch (_) {}
+}
+async function stopCamera() {
+  cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null;
+  await clearCompatibleCameraScanner();
+  cameraScanInProgress = false; cameraZoomTrack = null; cameraUsesHardwareZoom = false;
+  const video=document.getElementById('camera-video'); video.srcObject = null; video.style.transform='scale(1)';
+  const dialog = document.getElementById('camera-dialog'); if (dialog.open) dialog.close();
+}
 
 loadOrder().catch(error => { gridElement.innerHTML = `<div class="form-error">${escapeHtml(error.message)}</div>`; });
 orderSearchCategoryFilter = new SearchCategoryFilter({button:document.getElementById('order-search-filter-button'),panel:document.getElementById('order-search-filter-panel'),onChange:()=>{suggestionProducts=orderSearchCategoryFilter.filter(rawSuggestionProducts);renderSuggestions();searchResults.hidden=!suggestionProducts.length;},onSelectAll:()=>{suggestionProducts.forEach(product=>batchSelectedProducts.set(product.id,product));updateBatchSelection();renderSuggestions();}});
