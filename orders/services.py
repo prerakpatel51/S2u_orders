@@ -34,20 +34,41 @@ def get_sync_state(entity):
     return state
 
 
+def save_sync_state(state, revision):
+    """Advance a cursor without allowing an older worker to move it backwards."""
+    with transaction.atomic():
+        locked = SyncState.objects.select_for_update().get(pk=state.pk)
+        locked.last_revision = max(locked.last_revision, int(revision or 0))
+        locked.last_synced_at = timezone.now()
+        locked.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
+    state.last_revision = locked.last_revision
+    state.last_synced_at = locked.last_synced_at
+    return state
+
+
 def upsert_store(data):
     with transaction.atomic():
-        store, created = Store.objects.update_or_create(
-            korona_id=data["id"],
-            defaults={
-                "number": data.get("number") or "",
-                "name": data.get("name") or data.get("number") or data["id"],
-                "active": bool(data.get("active", True)),
-                "is_warehouse": bool(data.get("warehouse")),
-                "revision": data.get("revision") or 0,
-                "raw_data": data,
-                "last_synced_at": timezone.now(),
-            },
-        )
+        store = Store.objects.select_for_update().filter(korona_id=data["id"]).first()
+        incoming_revision = int(data.get("revision") or 0)
+        if store and incoming_revision < store.revision:
+            return store, False
+        defaults = {
+            "number": data.get("number") or "",
+            "name": data.get("name") or data.get("number") or data["id"],
+            "active": bool(data.get("active", True)),
+            "is_warehouse": bool(data.get("warehouse")),
+            "revision": incoming_revision,
+            "raw_data": data,
+            "last_synced_at": timezone.now(),
+        }
+        if store:
+            for field, value in defaults.items():
+                setattr(store, field, value)
+            store.save(update_fields=[*defaults, "updated_at"])
+            created = False
+        else:
+            store = Store.objects.create(korona_id=data["id"], **defaults)
+            created = True
         if not store.active or not store.is_warehouse:
             ProductStock.objects.filter(store=store).delete()
             SyncState.objects.filter(entity=STOCK_SYNC_ENTITY, store=store).delete()
@@ -67,9 +88,7 @@ def sync_stores():
             _, created = upsert_store(data)
             counts["created" if created else "updated"] += 1
         max_revision = page_revision or max_revision
-    state.last_revision = max_revision
-    state.last_synced_at = timezone.now()
-    state.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
+    save_sync_state(state, max_revision)
     return counts
 
 
@@ -83,19 +102,28 @@ def sync_products():
     ):
         for data in rows:
             counts["seen"] += 1
-            product, created = Product.objects.update_or_create(
-                korona_id=data["id"],
-                defaults={
-                    "number": data.get("number") or "",
-                    "name": data.get("name") or data.get("number") or data["id"],
-                    "normalized_name": normalize_search_text(data.get("name")),
-                    "active": bool(data.get("active", True)) and not bool(data.get("deactivated")),
-                    "track_inventory": bool(data.get("trackInventory", True)),
-                    "revision": data.get("revision") or 0,
-                    "raw_data": data,
-                    "last_synced_at": timezone.now(),
-                },
-            )
+            product = Product.objects.select_for_update().filter(korona_id=data["id"]).first()
+            incoming_revision = int(data.get("revision") or 0)
+            if product and incoming_revision < product.revision:
+                continue
+            defaults = {
+                "number": data.get("number") or "",
+                "name": data.get("name") or data.get("number") or data["id"],
+                "normalized_name": normalize_search_text(data.get("name")),
+                "active": bool(data.get("active", True)) and not bool(data.get("deactivated")),
+                "track_inventory": bool(data.get("trackInventory", True)),
+                "revision": incoming_revision,
+                "raw_data": data,
+                "last_synced_at": timezone.now(),
+            }
+            if product:
+                for field, value in defaults.items():
+                    setattr(product, field, value)
+                product.save(update_fields=[*defaults, "updated_at"])
+                created = False
+            else:
+                product = Product.objects.create(korona_id=data["id"], **defaults)
+                created = True
             codes = []
             for code_data in data.get("codes") or []:
                 code = str(code_data.get("productCode") or "").strip()
@@ -114,9 +142,7 @@ def sync_products():
             ProductCode.objects.bulk_create(codes, ignore_conflicts=True)
             counts["created" if created else "updated"] += 1
         max_revision = page_revision or max_revision
-    state.last_revision = max_revision
-    state.last_synced_at = timezone.now()
-    state.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
+    save_sync_state(state, max_revision)
     if counts["seen"]:
         replay_deferred_receipts()
     return counts
@@ -558,9 +584,10 @@ def _sync_revision_receipts(client, state, affected, counts, batch_pages, initia
             },
         ) or {}
         rows = payload.get("results") or []
-        state.last_revision = int(payload.get("maxRevision") or (rows[0].get("revision") if rows else 0) or 0)
-        state.last_synced_at = timezone.now()
-        state.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
+        save_sync_state(
+            state,
+            int(payload.get("maxRevision") or (rows[0].get("revision") if rows else 0) or 0),
+        )
         return
 
     cursor = state.last_revision
@@ -585,15 +612,11 @@ def _sync_revision_receipts(client, state, affected, counts, batch_pages, initia
             counts["seen"] += 1
             _apply_receipt(receipt, affected, counts)
         cursor = max(int(receipt.get("revision") or 0) for receipt in receipts)
-        state.last_revision = cursor
-        state.last_synced_at = timezone.now()
-        state.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
+        save_sync_state(state, cursor)
         if len(receipts) < 100:
             cursor = payload.get("maxRevision", cursor)
             break
-    state.last_revision = cursor
-    state.last_synced_at = timezone.now()
-    state.save(update_fields=["last_revision", "last_synced_at", "updated_at"])
+    save_sync_state(state, cursor)
 
 
 def sync_receipts(batch_pages=5):
@@ -743,7 +766,12 @@ def _apply_receipt(receipt, affected, counts):
             referenced_product_ids.add(str(product_id))
             if not cancelled:
                 quantities[str(product_id)] += decimal_value(item.get("quantity"))
-    existing = {str(line.product.korona_id): line for line in ReceiptSaleLine.objects.select_related("product").filter(receipt_id=receipt_id)}
+    existing = {
+        str(line.product.korona_id): line
+        for line in ReceiptSaleLine.objects.select_for_update()
+        .select_related("product")
+        .filter(receipt_id=receipt_id)
+    }
     candidate_product_ids = referenced_product_ids | set(existing)
     products = {str(p.korona_id): p for p in Product.objects.filter(korona_id__in=candidate_product_ids)}
     missing_product_ids = referenced_product_ids - set(products)

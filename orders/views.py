@@ -224,12 +224,13 @@ class OrderListDetailAPIView(APIView):
         })
 
     def patch(self, request, pk):
-        order_list = get_object_or_404(OrderList, pk=pk)
-        if not can_edit_order(request.user, order_list):
-            return Response({"detail": "This finalized list is read-only."}, status=403)
-        serializer = OrderListSummarySerializer(order_list, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
+        with transaction.atomic():
+            order_list = get_object_or_404(OrderList.objects.select_for_update(), pk=pk)
+            if not can_edit_order(request.user, order_list):
+                return Response({"detail": "This finalized list is read-only."}, status=403)
+            serializer = OrderListSummarySerializer(order_list, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
         return Response(serializer.data)
 
     def delete(self, request, pk):
@@ -240,10 +241,11 @@ class OrderListDetailAPIView(APIView):
 
 
 class OrderListFinalizeAPIView(APIView):
+    @transaction.atomic
     def post(self, request, pk):
         if not is_admin(request.user):
             return Response({"detail": "Administrator access required."}, status=403)
-        order_list = get_object_or_404(OrderList, pk=pk)
+        order_list = get_object_or_404(OrderList.objects.select_for_update(), pk=pk)
         if order_list.status != OrderList.Status.DRAFT:
             return Response({"detail": "Only a draft list can be finalized."}, status=409)
         order_list.status = OrderList.Status.FINALIZED
@@ -290,7 +292,7 @@ class ProductCategoryPreferenceAPIView(APIView):
 class OrderItemCreateAPIView(APIView):
     @transaction.atomic
     def post(self, request, pk):
-        order_list = get_object_or_404(OrderList, pk=pk)
+        order_list = get_object_or_404(OrderList.objects.select_for_update(), pk=pk)
         if not can_edit_order(request.user, order_list):
             return Response({"detail": "This finalized list is read-only."}, status=403)
         product = get_object_or_404(available_products(), pk=request.data.get("product_id"))
@@ -404,9 +406,11 @@ class OrderItemBulkCreateAPIView(APIView):
 
 
 class OrderItemDetailAPIView(APIView):
+    @transaction.atomic
     def patch(self, request, pk):
-        item = get_object_or_404(OrderListItem.objects.select_related("order_list", "product"), pk=pk)
-        if not can_edit_order(request.user, item.order_list):
+        item = get_object_or_404(OrderListItem.objects.select_related("product"), pk=pk)
+        order_list = get_object_or_404(OrderList.objects.select_for_update(), pk=item.order_list_id)
+        if not can_edit_order(request.user, order_list):
             return Response({"detail": "This finalized list is read-only."}, status=403)
         if not is_admin(request.user):
             allowed = {"on_shelf_quantity", "notes"}
@@ -414,15 +418,17 @@ class OrderItemDetailAPIView(APIView):
             if disallowed:
                 return Response({"detail": "Only shelf quantity and notes can be changed."}, status=403)
         serializer = OrderListItemSerializer(
-            item, data=request.data, partial=True, context=item_context(item.order_list, request)
+            item, data=request.data, partial=True, context=item_context(order_list, request)
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
 
+    @transaction.atomic
     def delete(self, request, pk):
-        item = get_object_or_404(OrderListItem.objects.select_related("order_list"), pk=pk)
-        if not can_edit_order(request.user, item.order_list):
+        item = get_object_or_404(OrderListItem.objects.only("pk", "order_list_id"), pk=pk)
+        order_list = get_object_or_404(OrderList.objects.select_for_update(), pk=item.order_list_id)
+        if not can_edit_order(request.user, order_list):
             return Response({"detail": "This finalized list is read-only."}, status=403)
         item.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -50,9 +50,12 @@ from .services import (
     recalculate_stale_monthly_needs,
     replay_deferred_receipts,
     reconcile_store_stocks,
+    save_sync_state,
+    sync_products,
     sync_monthly_receipt_history,
     sync_receipts,
     sync_store_stocks_incremental,
+    upsert_store,
 )
 from .serializers import supplier_short_name
 from .tasks import (
@@ -359,6 +362,92 @@ class ReceiptSyncTests(TestCase):
             "cancelled": cancelled,
             "items": [{"product": {"id": str(self.product.korona_id)}, "quantity": quantity}],
         }
+
+    def test_sync_cursor_never_moves_backwards(self):
+        state = SyncState.objects.create(entity="cursor-test", last_revision=10)
+
+        save_sync_state(state, 4)
+
+        state.refresh_from_db()
+        self.assertEqual(state.last_revision, 10)
+
+    def test_older_store_snapshot_cannot_regress_catalog_state(self):
+        store_id = uuid.uuid4()
+        upsert_store(
+            {
+                "id": str(store_id),
+                "number": "10",
+                "name": "Current",
+                "active": True,
+                "warehouse": True,
+                "revision": 10,
+            }
+        )
+
+        upsert_store(
+            {
+                "id": str(store_id),
+                "number": "9",
+                "name": "Stale",
+                "active": False,
+                "warehouse": False,
+                "revision": 9,
+            }
+        )
+
+        store = Store.objects.get(korona_id=store_id)
+        self.assertEqual(store.name, "Current")
+        self.assertTrue(store.active)
+        self.assertTrue(store.is_warehouse)
+        self.assertEqual(store.revision, 10)
+
+    @patch("orders.services.KoronaClient")
+    def test_older_product_snapshot_cannot_regress_catalog_state(self, client_class):
+        product_id = uuid.uuid4()
+        client = client_class.return_value
+        client.paginated.side_effect = [
+            iter(
+                [
+                    (
+                        [
+                            {
+                                "id": str(product_id),
+                                "number": "10",
+                                "name": "Current",
+                                "revision": 10,
+                                "codes": [],
+                            }
+                        ],
+                        10,
+                    )
+                ]
+            ),
+            iter(
+                [
+                    (
+                        [
+                            {
+                                "id": str(product_id),
+                                "number": "9",
+                                "name": "Stale",
+                                "revision": 9,
+                                "codes": [],
+                            }
+                        ],
+                        9,
+                    )
+                ]
+            ),
+        ]
+
+        sync_products()
+        sync_products()
+
+        product = Product.objects.get(korona_id=product_id)
+        state = SyncState.objects.get(entity="products", store__isnull=True)
+        self.assertEqual(product.name, "Current")
+        self.assertEqual(product.revision, 10)
+        self.assertEqual(state.last_revision, 10)
 
     def test_receipt_revision_applies_only_delta(self):
         affected, counts = set(), {"created": 0, "updated": 0}

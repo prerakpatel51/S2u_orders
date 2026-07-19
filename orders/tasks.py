@@ -4,6 +4,7 @@ from datetime import timedelta
 from celery import shared_task
 from celery.signals import worker_ready
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -108,38 +109,47 @@ def recover_runs_after_worker_restart(**_kwargs):
 
 def run_controlled(service_name, force=False, ignore_interval=False):
     function, default_interval = SERVICES[service_name]
-    control, _ = ServiceControl.objects.get_or_create(
-        service_name=service_name, defaults={"interval_seconds": default_interval}
-    )
-    now = timezone.now()
     recover_interrupted_runs(expired_only=True)
-    if not force and not control.enabled:
-        control.status = ServiceControl.Status.DISABLED
-        control.save(update_fields=["status", "updated_at"])
-        SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
-        return {"skipped": True, "reason": "disabled"}
-    if not force and not ignore_interval and control.next_run_at and control.next_run_at > now:
-        return {"skipped": True, "reason": "not due"}
-    if service_name in STOCK_SERVICES and ServiceControl.objects.filter(
-        service_name__in=STOCK_SERVICES,
-        locked_until__gt=now,
-    ).exclude(pk=control.pk).exists():
-        SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
-        return {"skipped": True, "reason": "another stock synchronization is running"}
-    if service_name in MONTHLY_SERVICES and ServiceControl.objects.filter(
-        service_name__in=MONTHLY_SERVICES,
-    ).exclude(pk=control.pk).filter(
-        Q(locked_until__gt=now) | Q(status=ServiceControl.Status.QUEUED)
-    ).exists():
-        SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
-        return {"skipped": True, "reason": MONTHLY_CONFLICT_REASON}
-    if control.locked_until and control.locked_until > now:
-        return {"skipped": True, "reason": "already running"}
-    control.status = ServiceControl.Status.RUNNING
-    control.locked_until = now + SERVICE_LOCK_TIMEOUTS.get(service_name, timedelta(minutes=15))
-    control.last_error = ""
-    control.save(update_fields=["status", "locked_until", "last_error", "updated_at"])
-    run = SyncRun.objects.create(job_name=service_name)
+    conflict_names = STOCK_SERVICES if service_name in STOCK_SERVICES else MONTHLY_SERVICES if service_name in MONTHLY_SERVICES else {service_name}
+    with transaction.atomic():
+        ServiceControl.objects.get_or_create(
+            service_name=service_name, defaults={"interval_seconds": default_interval}
+        )
+        controls = {
+            control.service_name: control
+            for control in ServiceControl.objects.select_for_update().filter(
+                service_name__in=conflict_names
+            ).order_by("service_name")
+        }
+        control = controls[service_name]
+        now = timezone.now()
+        if not force and not control.enabled:
+            control.status = ServiceControl.Status.DISABLED
+            control.save(update_fields=["status", "updated_at"])
+            SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
+            return {"skipped": True, "reason": "disabled"}
+        if not force and not ignore_interval and control.next_run_at and control.next_run_at > now:
+            return {"skipped": True, "reason": "not due"}
+        other_controls = [row for name, row in controls.items() if name != service_name]
+        if service_name in STOCK_SERVICES and any(
+            row.locked_until and row.locked_until > now for row in other_controls
+        ):
+            SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
+            return {"skipped": True, "reason": "another stock synchronization is running"}
+        if service_name in MONTHLY_SERVICES and any(
+            (row.locked_until and row.locked_until > now) or row.status == ServiceControl.Status.QUEUED
+            for row in other_controls
+        ):
+            SyncRun.objects.create(job_name=service_name, status=SyncRun.Status.SKIPPED, finished_at=now)
+            return {"skipped": True, "reason": MONTHLY_CONFLICT_REASON}
+        if control.locked_until and control.locked_until > now:
+            return {"skipped": True, "reason": "already running"}
+        control.status = ServiceControl.Status.RUNNING
+        control.locked_until = now + SERVICE_LOCK_TIMEOUTS.get(service_name, timedelta(minutes=15))
+        control.last_error = ""
+        control.save(update_fields=["status", "locked_until", "last_error", "updated_at"])
+        claimed_until = control.locked_until
+        run = SyncRun.objects.create(job_name=service_name)
     started = timezone.now()
     try:
         counts = function()
@@ -153,12 +163,15 @@ def run_controlled(service_name, force=False, ignore_interval=False):
         run.metrics = counts
         run.save()
         resolve_worker_interruptions(service_name, finished)
-        control.status = ServiceControl.Status.IDLE if control.enabled else ServiceControl.Status.DISABLED
-        control.last_run_at = finished
-        control.next_run_at = (
-            None
-            if service_name in {"stock_reconciliation", "monthly_reconciliation"}
-            else finished + timedelta(seconds=control.interval_seconds)
+        ServiceControl.objects.filter(pk=control.pk, locked_until=claimed_until).update(
+            status=ServiceControl.Status.IDLE if control.enabled else ServiceControl.Status.DISABLED,
+            last_run_at=finished,
+            next_run_at=(
+                None
+                if service_name in {"stock_reconciliation", "monthly_reconciliation"}
+                else finished + timedelta(seconds=control.interval_seconds)
+            ),
+            updated_at=finished,
         )
         return counts
     except Exception as exc:
@@ -169,13 +182,17 @@ def run_controlled(service_name, force=False, ignore_interval=False):
         run.duration_ms = int((finished - started).total_seconds() * 1000)
         run.error_message = str(exc)[:4000]
         run.save()
-        control.status = ServiceControl.Status.ERROR
-        control.last_error = str(exc)[:4000]
+        ServiceControl.objects.filter(pk=control.pk, locked_until=claimed_until).update(
+            status=ServiceControl.Status.ERROR,
+            last_error=str(exc)[:4000],
+            updated_at=finished,
+        )
         SystemLog.objects.create(level="ERROR", source=f"sync.{service_name}", message=str(exc))
         raise
     finally:
-        control.locked_until = None
-        control.save()
+        ServiceControl.objects.filter(pk=control.pk, locked_until=claimed_until).update(
+            locked_until=None, updated_at=timezone.now()
+        )
 
 
 @shared_task(name="orders.tasks.sync_stores_task")

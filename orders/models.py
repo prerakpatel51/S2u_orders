@@ -2,6 +2,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 
@@ -261,6 +262,13 @@ class SyncState(TimeStampedModel):
 
     class Meta:
         unique_together = [("entity", "store")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["entity"],
+                condition=Q(store__isnull=True),
+                name="orders_syncstate_global_entity_unique",
+            ),
+        ]
 
 
 class SyncRun(TimeStampedModel):

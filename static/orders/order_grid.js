@@ -386,36 +386,29 @@ async function loadOrder() {
 }
 
 function handleCellKeyDown(event) {
-  const keyboardEvent = event.event;
-  if ((keyboardEvent.ctrlKey || keyboardEvent.metaKey) && keyboardEvent.key.toLowerCase() === 'c') {
-    const activeSelection = window.getSelection()?.toString();
-    const input = keyboardEvent.target.closest?.('input, textarea, [contenteditable="true"]');
-    const inputHasSelection = input && input.selectionStart !== undefined && input.selectionStart !== input.selectionEnd;
-    if (activeSelection || inputHasSelection) return;
-    const cell = keyboardEvent.target.closest?.('.ag-cell') || document.querySelector('#order-grid .ag-cell-focus');
-    const text = cell?.innerText?.trim();
-    if (!text) return;
-    keyboardEvent.preventDefault();
-    copyTextToClipboard(text);
-    return;
-  }
   if (event.colDef.field !== 'on_shelf_quantity' || !['ArrowUp', 'ArrowDown'].includes(event.event.key)) return;
   const next = Math.max(0, Number(event.value || 0) + (event.event.key === 'ArrowUp' ? 1 : -1));
   event.event.preventDefault();
   event.node.setDataValue('on_shelf_quantity', next);
 }
 
-async function copyTextToClipboard(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (_) {
-    const textarea = document.createElement('textarea');
-    textarea.value = text; textarea.setAttribute('readonly', '');
-    textarea.style.position = 'fixed'; textarea.style.opacity = '0';
-    document.body.appendChild(textarea); textarea.select();
-    document.execCommand('copy'); textarea.remove();
-  }
+function handleGridCopy(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const editor = target?.closest('input, textarea, [contenteditable="true"]');
+  const editorHasSelection = editor && editor.selectionStart !== undefined && editor.selectionStart !== editor.selectionEnd;
+  if (window.getSelection()?.toString() || editorHasSelection) return;
+
+  const cell = target?.closest('.ag-cell') || gridElement.querySelector('.ag-cell-focus');
+  const text = cell?.innerText?.trim();
+  if (!text || !event.clipboardData) return;
+
+  // Writing through the synchronous copy event works in every supported browser
+  // and does not depend on Clipboard API permissions in the deployed site.
+  event.clipboardData.setData('text/plain', text);
+  event.preventDefault();
 }
+
+gridElement.addEventListener('copy', handleGridCopy);
 
 async function saveCell(event) {
   if (event.colDef.field === 'supplier_name') {
