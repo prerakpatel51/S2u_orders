@@ -102,45 +102,46 @@ def sync_products():
     ):
         for data in rows:
             counts["seen"] += 1
-            product = Product.objects.select_for_update().filter(korona_id=data["id"]).first()
-            incoming_revision = int(data.get("revision") or 0)
-            if product and incoming_revision < product.revision:
-                continue
-            defaults = {
-                "number": data.get("number") or "",
-                "name": data.get("name") or data.get("number") or data["id"],
-                "normalized_name": normalize_search_text(data.get("name")),
-                "active": bool(data.get("active", True)) and not bool(data.get("deactivated")),
-                "track_inventory": bool(data.get("trackInventory", True)),
-                "revision": incoming_revision,
-                "raw_data": data,
-                "last_synced_at": timezone.now(),
-            }
-            if product:
-                for field, value in defaults.items():
-                    setattr(product, field, value)
-                product.save(update_fields=[*defaults, "updated_at"])
-                created = False
-            else:
-                product = Product.objects.create(korona_id=data["id"], **defaults)
-                created = True
-            codes = []
-            for code_data in data.get("codes") or []:
-                code = str(code_data.get("productCode") or "").strip()
-                if not code:
+            with transaction.atomic():
+                product = Product.objects.select_for_update().filter(korona_id=data["id"]).first()
+                incoming_revision = int(data.get("revision") or 0)
+                if product and incoming_revision < product.revision:
                     continue
-                codes.append(
-                    ProductCode(
-                        product=product,
-                        code=code,
-                        normalized_code=normalize_search_text(code),
-                        container_size=code_data.get("containerSize"),
-                        description=code_data.get("description") or "",
+                defaults = {
+                    "number": data.get("number") or "",
+                    "name": data.get("name") or data.get("number") or data["id"],
+                    "normalized_name": normalize_search_text(data.get("name")),
+                    "active": bool(data.get("active", True)) and not bool(data.get("deactivated")),
+                    "track_inventory": bool(data.get("trackInventory", True)),
+                    "revision": incoming_revision,
+                    "raw_data": data,
+                    "last_synced_at": timezone.now(),
+                }
+                if product:
+                    for field, value in defaults.items():
+                        setattr(product, field, value)
+                    product.save(update_fields=[*defaults, "updated_at"])
+                    created = False
+                else:
+                    product = Product.objects.create(korona_id=data["id"], **defaults)
+                    created = True
+                codes = []
+                for code_data in data.get("codes") or []:
+                    code = str(code_data.get("productCode") or "").strip()
+                    if not code:
+                        continue
+                    codes.append(
+                        ProductCode(
+                            product=product,
+                            code=code,
+                            normalized_code=normalize_search_text(code),
+                            container_size=code_data.get("containerSize"),
+                            description=code_data.get("description") or "",
+                        )
                     )
-                )
-            ProductCode.objects.filter(product=product).delete()
-            ProductCode.objects.bulk_create(codes, ignore_conflicts=True)
-            counts["created" if created else "updated"] += 1
+                ProductCode.objects.filter(product=product).delete()
+                ProductCode.objects.bulk_create(codes, ignore_conflicts=True)
+                counts["created" if created else "updated"] += 1
         max_revision = page_revision or max_revision
     save_sync_state(state, max_revision)
     if counts["seen"]:

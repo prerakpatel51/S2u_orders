@@ -10,7 +10,8 @@ from unittest.mock import Mock, patch
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
-from django.test import RequestFactory, TestCase, override_settings
+from django.db import connection
+from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from openpyxl import load_workbook
 
@@ -349,6 +350,43 @@ class StoreStockSyncTests(TestCase):
         self.assertEqual(result["reason"], "already running")
         self.assertEqual(control.status, ServiceControl.Status.IDLE)
         self.assertIsNone(control.locked_until)
+
+
+class ProductSyncTransactionTests(TransactionTestCase):
+    @patch("orders.services.KoronaClient")
+    def test_product_row_lock_and_code_replacement_are_atomic(self, client_class):
+        product_id = uuid.uuid4()
+        client_class.return_value.paginated.return_value = iter(
+            [
+                (
+                    [
+                        {
+                            "id": str(product_id),
+                            "number": "100",
+                            "name": "Atomic Product",
+                            "revision": 1,
+                            "codes": [{"productCode": "ABC-100"}],
+                        }
+                    ],
+                    1,
+                )
+            ]
+        )
+        manager = Product.objects
+        original_select_for_update = manager.select_for_update
+        atomic_states = []
+
+        def checked_select_for_update(*args, **kwargs):
+            atomic_states.append(connection.in_atomic_block)
+            return original_select_for_update(*args, **kwargs)
+
+        with patch.object(manager, "select_for_update", side_effect=checked_select_for_update):
+            result = sync_products()
+
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(atomic_states, [True])
+        product = Product.objects.get(korona_id=product_id)
+        self.assertEqual(list(product.codes.values_list("code", flat=True)), ["ABC-100"])
 
 
 class ReceiptSyncTests(TestCase):
