@@ -121,6 +121,10 @@ CSRF_TRUSTED_ORIGINS = [
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = IS_RAILWAY and not DEBUG
+# Railway's internal deployment probe uses plain HTTP inside the private
+# network. These endpoints expose no sensitive data and must return 200 rather
+# than redirecting before the request reaches Django's readiness view.
+SECURE_REDIRECT_EXEMPT = [r"^live$", r"^ready$", r"^api/health(?:/runtime)?/$"]
 SESSION_COOKIE_SECURE = IS_RAILWAY and not DEBUG
 CSRF_COOKIE_SECURE = IS_RAILWAY and not DEBUG
 SECURE_HSTS_SECONDS = 31536000 if IS_RAILWAY and not DEBUG else 0

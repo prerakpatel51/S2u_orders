@@ -2211,6 +2211,18 @@ class RuntimeHealthTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["checks"], {"database": True, "redis": True})
 
+    @override_settings(
+        SECURE_SSL_REDIRECT=True,
+        SECURE_REDIRECT_EXEMPT=[r"^live$", r"^ready$", r"^api/health(?:/runtime)?/$"],
+    )
+    @patch("orders.views.Redis.from_url")
+    def test_internal_readiness_probe_is_not_redirected_to_https(self, from_url):
+        from_url.return_value.ping.return_value = True
+
+        response = self.client.get("/ready", secure=False)
+
+        self.assertEqual(response.status_code, 200)
+
     @patch("orders.views.Redis.from_url")
     def test_dependency_health_requires_database_and_redis(self, from_url):
         from_url.return_value.ping.return_value = True
