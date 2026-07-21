@@ -129,29 +129,64 @@ SECURE_HSTS_PRELOAD = IS_RAILWAY and not DEBUG
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_BROKER_URL = REDIS_URL
-CELERY_RESULT_BACKEND = REDIS_URL
+# Task state is persisted in PostgreSQL by the application. No caller reads a
+# Celery return value, so keeping a second copy in Redis only adds keys and RDB
+# writes to the broker.
+CELERY_RESULT_BACKEND = None
+CELERY_TASK_IGNORE_RESULT = True
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_TASK_DEFAULT_QUEUE = "short"
+CELERY_TASK_ROUTES = {
+    "orders.tasks.reconcile_stocks_task": {"queue": "long"},
+    "orders.tasks.reconcile_monthly_totals_task": {"queue": "long"},
+    "orders.tasks.backup_delivery_metadata_task": {"queue": "long"},
+    "orders.tasks.build_delivery_recovery_export_task": {"queue": "long"},
+}
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_SOFT_TIME_LIMIT = 3 * 60 * 60
+CELERY_TASK_TIME_LIMIT = 3 * 60 * 60 + 5 * 60
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    # Long reconciliation tasks must not be delivered to a second worker while
+    # the original worker is still processing them.
+    "visibility_timeout": 4 * 60 * 60,
+}
+CELERY_BROKER_CONNECTION_TIMEOUT = int(os.getenv("CELERY_BROKER_CONNECTION_TIMEOUT", "5"))
+RUNTIME_HEARTBEAT_STALE_SECONDS = max(
+    60, int(os.getenv("RUNTIME_HEARTBEAT_STALE_SECONDS", "180"))
+)
 KORONA_STOCK_RECONCILE_HOUR = min(23, max(0, int(os.getenv("KORONA_STOCK_RECONCILE_HOUR", "3"))))
 KORONA_STOCK_RECONCILE_MINUTE = min(59, max(0, int(os.getenv("KORONA_STOCK_RECONCILE_MINUTE", "15"))))
 KORONA_MONTHLY_RECONCILE_HOUR = min(23, max(0, int(os.getenv("KORONA_MONTHLY_RECONCILE_HOUR", "4"))))
 KORONA_MONTHLY_RECONCILE_MINUTE = min(59, max(0, int(os.getenv("KORONA_MONTHLY_RECONCILE_MINUTE", "15"))))
+KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS = max(
+    30, int(os.getenv("KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS", "120"))
+)
 CELERY_BEAT_SCHEDULE = {
     "sync-korona-receipts": {
         "task": "orders.tasks.sync_receipts_task",
-        "schedule": 30.0,
+        "schedule": 120.0,
+        "options": {"expires": 110},
     },
     "sync-korona-products": {
         "task": "orders.tasks.sync_products_task",
-        "schedule": 30.0,
+        "schedule": 900.0,
+        "options": {"expires": 840},
     },
     "sync-korona-stores": {
         "task": "orders.tasks.sync_stores_task",
-        "schedule": 30.0,
+        "schedule": 1800.0,
+        "options": {"expires": 1740},
     },
     "sync-korona-stocks": {
         "task": "orders.tasks.sync_stocks_task",
-        "schedule": 30.0,
+        "schedule": KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS,
+        "options": {"expires": max(30, KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS - 10)},
+    },
+    "runtime-heartbeat": {
+        "task": "orders.tasks.runtime_heartbeat_task",
+        "schedule": 60.0,
+        "options": {"expires": 50},
     },
     "reconcile-korona-stocks-nightly": {
         "task": "orders.tasks.reconcile_stocks_task",
@@ -194,9 +229,6 @@ KORONA_READ_TIMEOUT_SECONDS = float(os.getenv("KORONA_READ_TIMEOUT_SECONDS", "45
 KORONA_HTTP_RETRIES = max(0, int(os.getenv("KORONA_HTTP_RETRIES", "3")))
 KORONA_HTTP_BACKOFF_SECONDS = max(0.0, float(os.getenv("KORONA_HTTP_BACKOFF_SECONDS", "0.5")))
 KORONA_STOCK_PAGE_SIZE = max(100, min(1000, int(os.getenv("KORONA_STOCK_PAGE_SIZE", "1000"))))
-KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS = max(
-    30, int(os.getenv("KORONA_STOCK_INCREMENTAL_INTERVAL_SECONDS", "120"))
-)
 KORONA_STOCK_RECONCILE_INTERVAL_SECONDS = max(
     3600, int(os.getenv("KORONA_STOCK_RECONCILE_INTERVAL_SECONDS", "86400"))
 )

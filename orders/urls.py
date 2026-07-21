@@ -4,6 +4,7 @@ from . import delivery_views, views
 
 urlpatterns = [
     path("health/", views.HealthAPIView.as_view(), name="api-health"),
+    path("health/runtime/", views.RuntimeHealthAPIView.as_view(), name="api-runtime-health"),
     path("stores/", views.StoreListAPIView.as_view(), name="api-stores"),
     path("orders/", views.OrderListAPIView.as_view(), name="api-orders"),
     path("orders/<int:pk>/", views.OrderListDetailAPIView.as_view(), name="api-order-detail"),

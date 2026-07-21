@@ -95,13 +95,18 @@ The initial imported application is preserved as commit `255ddb1`.
 
 ## Railway deployment
 
-Create PostgreSQL and Redis services, then create Web, Worker, and Beat services from this repository using the same Dockerfile:
+Create PostgreSQL and Redis services, then create Web, short Worker, long Worker, and Beat services from this repository using the same Dockerfile:
 
 - Web: `gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --worker-class gthread --threads 4 --timeout 60 --keep-alive 5`
-- Worker: `celery -A config worker -l INFO`
+- Worker: set `PROCESS_TYPE=worker`; consumes the `short` queue with concurrency 2
+- Long Worker: set `PROCESS_TYPE=long-worker`; consumes the `long` queue with concurrency 1
 - Beat: `celery -A config beat -l INFO`
 
-Set the variables from `.env.example` on every service. Set `RUN_MIGRATIONS=1` only on the Railway Web service and `RUN_MIGRATIONS=0` on Worker and Beat. Local Compose uses a dedicated one-shot migration service before application containers start.
+Set the variables from `.env.example` on every service. Set `RUN_MIGRATIONS=1` only on the Railway Web service and `RUN_MIGRATIONS=0` on both Workers and Beat. Local Compose uses a dedicated one-shot migration service before application containers start. Worker and Beat startup performs a bounded Redis readiness check and exits on failure so Railway can restart and alert on the failed process.
+
+Configure the Web service deployment healthcheck as `/api/health/`. Railway uses this during deployment; continuous external monitoring should poll `/api/health/runtime/`, which also requires a recent task published by Beat and consumed by the short Worker. Optional `MONITORING_*_HEARTBEAT_URL` variables can notify Better Stack, UptimeRobot, or another POST-compatible heartbeat provider.
+
+The Redis service is a disposable Celery broker: PostgreSQL remains the system of record. Do not use an every-minute `--save 60 1` snapshot policy. Either run the broker without persistence/volume, or use a less aggressive RDB policy such as `--save 900 1 --save 300 10 --save 60 10000` and monitor restart count and snapshot latency.
 
 ### Delivery proof storage
 

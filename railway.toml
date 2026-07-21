@@ -3,4 +3,4 @@ builder = "DOCKERFILE"
 
 [deploy]
 startCommand = "/app/start.sh"
-restartPolicyType = "ON_FAILURE"
+restartPolicyType = "ALWAYS"

@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -15,6 +15,8 @@ from rest_framework import status
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from redis import Redis
+from redis.exceptions import RedisError
 
 from .exports import (
     EXPORT_KINDS,
@@ -1319,10 +1321,69 @@ class UserDetailAPIView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def dependency_health():
+    checks = {"database": False, "redis": False}
+    errors = {}
+    try:
+        connection.ensure_connection()
+        checks["database"] = True
+    except Exception as exc:
+        errors["database"] = str(exc)[:200]
+    try:
+        Redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        ).ping()
+        checks["redis"] = True
+    except RedisError as exc:
+        errors["redis"] = str(exc)[:200]
+    return checks, errors
+
+
 class HealthAPIView(APIView):
     authentication_classes = []
     permission_classes = []
 
     def get(self, request):
-        Store.objects.exists()
-        return Response({"status": "ok"})
+        checks, errors = dependency_health()
+        healthy = all(checks.values())
+        return Response(
+            {"status": "ok" if healthy else "unavailable", "checks": checks, "errors": errors},
+            status=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+
+class RuntimeHealthAPIView(APIView):
+    """Continuous check proving Redis, Beat, and a short worker are operating."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        checks, errors = dependency_health()
+        heartbeat = SystemSetting.objects.filter(key="runtime_heartbeat").first()
+        checked_at = (heartbeat.value or {}).get("checked_at") if heartbeat else None
+        age_seconds = None
+        if checked_at:
+            try:
+                parsed = datetime.fromisoformat(checked_at)
+                if timezone.is_naive(parsed):
+                    parsed = timezone.make_aware(parsed)
+                age_seconds = max(0, int((timezone.now() - parsed).total_seconds()))
+            except (TypeError, ValueError):
+                errors["runtime"] = "The runtime heartbeat timestamp is invalid."
+        runtime_ok = age_seconds is not None and age_seconds <= settings.RUNTIME_HEARTBEAT_STALE_SECONDS
+        checks["runtime"] = runtime_ok
+        if not runtime_ok and "runtime" not in errors:
+            errors["runtime"] = "Worker/Beat heartbeat is missing or stale."
+        healthy = all(checks.values())
+        return Response(
+            {
+                "status": "ok" if healthy else "unavailable",
+                "checks": checks,
+                "errors": errors,
+                "runtime_heartbeat_age_seconds": age_seconds,
+            },
+            status=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+        )

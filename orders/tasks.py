@@ -1,6 +1,8 @@
 import logging
+import os
 from datetime import timedelta
 
+import requests
 from celery import shared_task
 from celery.signals import worker_ready
 from django.conf import settings
@@ -25,6 +27,7 @@ from .models import (
     DeliveryRecoveryExport,
     ServiceControl,
     SyncRun,
+    SystemSetting,
     SystemLog,
 )
 from .services import reconcile_monthly_needs, reconcile_stocks, sync_products, sync_receipts, sync_stocks, sync_stores
@@ -47,6 +50,21 @@ SERVICE_LOCK_TIMEOUTS = {
     "monthly_reconciliation": timedelta(hours=4),
 }
 INTERRUPTED_MESSAGE = "Worker stopped before this job completed. Run it again when ready."
+
+
+def send_monitoring_heartbeat(name, *, failed=False):
+    """Notify an optional provider-neutral external heartbeat endpoint."""
+    variable = f"MONITORING_{name.upper()}_{'FAILURE_' if failed else ''}HEARTBEAT_URL"
+    url = os.getenv(variable, "").strip()
+    if not url:
+        return False
+    try:
+        requests.post(url, timeout=3).raise_for_status()
+        return True
+    except requests.RequestException:
+        # Monitoring must report application failures, never create them.
+        logger.warning("Could not send %s monitoring heartbeat", name, exc_info=True)
+        return False
 
 
 def resolve_worker_interruptions(service_name, resolved_at):
@@ -162,6 +180,7 @@ def run_controlled(service_name, force=False, ignore_interval=False):
         run.records_updated = counts.get("updated", 0)
         run.metrics = counts
         run.save()
+        send_monitoring_heartbeat(service_name)
         resolve_worker_interruptions(service_name, finished)
         ServiceControl.objects.filter(pk=control.pk, locked_until=claimed_until).update(
             status=ServiceControl.Status.IDLE if control.enabled else ServiceControl.Status.DISABLED,
@@ -188,6 +207,7 @@ def run_controlled(service_name, force=False, ignore_interval=False):
             updated_at=finished,
         )
         SystemLog.objects.create(level="ERROR", source=f"sync.{service_name}", message=str(exc))
+        send_monitoring_heartbeat(service_name, failed=True)
         raise
     finally:
         ServiceControl.objects.filter(pk=control.pk, locked_until=claimed_until).update(
@@ -195,27 +215,27 @@ def run_controlled(service_name, force=False, ignore_interval=False):
         )
 
 
-@shared_task(name="orders.tasks.sync_stores_task")
+@shared_task(name="orders.tasks.sync_stores_task", ignore_result=True)
 def sync_stores_task(force=False):
     return run_controlled("stores", force)
 
 
-@shared_task(name="orders.tasks.sync_products_task")
+@shared_task(name="orders.tasks.sync_products_task", ignore_result=True)
 def sync_products_task(force=False):
     return run_controlled("products", force)
 
 
-@shared_task(name="orders.tasks.sync_stocks_task")
+@shared_task(name="orders.tasks.sync_stocks_task", ignore_result=True)
 def sync_stocks_task(force=False):
     return run_controlled("stocks", force)
 
 
-@shared_task(name="orders.tasks.reconcile_stocks_task")
+@shared_task(name="orders.tasks.reconcile_stocks_task", ignore_result=True)
 def reconcile_stocks_task(force=False):
     return run_controlled("stock_reconciliation", force, ignore_interval=True)
 
 
-@shared_task(name="orders.tasks.sync_receipts_task")
+@shared_task(name="orders.tasks.sync_receipts_task", ignore_result=True)
 def sync_receipts_task(force=False):
     try:
         return run_controlled("receipts", force)
@@ -223,7 +243,7 @@ def sync_receipts_task(force=False):
         dispatch_waiting_monthly_reconciliation()
 
 
-@shared_task(name="orders.tasks.reconcile_monthly_totals_task")
+@shared_task(name="orders.tasks.reconcile_monthly_totals_task", ignore_result=True)
 def reconcile_monthly_totals_task(force=False):
     result = run_controlled("monthly_reconciliation", force, ignore_interval=True)
     control, _ = ServiceControl.objects.get_or_create(
@@ -272,7 +292,18 @@ def dispatch_waiting_monthly_reconciliation():
     return True
 
 
-@shared_task(name="orders.tasks.backup_delivery_metadata_task")
+@shared_task(name="orders.tasks.runtime_heartbeat_task", ignore_result=True)
+def runtime_heartbeat_task():
+    """Prove that Beat can publish and a short-queue worker can consume."""
+    checked_at = timezone.now()
+    SystemSetting.objects.update_or_create(
+        key="runtime_heartbeat",
+        defaults={"value": {"checked_at": checked_at.isoformat()}},
+    )
+    send_monitoring_heartbeat("runtime")
+
+
+@shared_task(name="orders.tasks.backup_delivery_metadata_task", ignore_result=True)
 def backup_delivery_metadata_task():
     """Create a daily searchable metadata catalog in independent DR storage."""
     if not dr_is_configured():
@@ -303,7 +334,7 @@ def backup_delivery_metadata_task():
         raise
 
 
-@shared_task(bind=True, name="orders.tasks.replicate_delivery_asset_task", max_retries=5)
+@shared_task(bind=True, name="orders.tasks.replicate_delivery_asset_task", max_retries=5, ignore_result=True)
 def replicate_delivery_asset_task(self, asset_id):
     """Copy a confirmed immutable asset to DR and retry transient failures."""
     try:
@@ -326,7 +357,7 @@ def replicate_delivery_asset_task(self, asset_id):
         raise self.retry(exc=exc, countdown=countdown)
 
 
-@shared_task(name="orders.tasks.verify_delivery_replica_task")
+@shared_task(name="orders.tasks.verify_delivery_replica_task", ignore_result=True)
 def verify_delivery_replica_task(replica_id):
     try:
         replica = DeliveryAssetReplica.objects.get(pk=replica_id)
@@ -336,7 +367,7 @@ def verify_delivery_replica_task(replica_id):
     return {"asset_uuid": str(checked.asset.uuid), "status": checked.status}
 
 
-@shared_task(name="orders.tasks.reconcile_delivery_replicas_task")
+@shared_task(name="orders.tasks.reconcile_delivery_replicas_task", ignore_result=True)
 def reconcile_delivery_replicas_task():
     """Catch missed jobs and periodically prove that recovery copies still exist."""
     if not is_configured() or not dr_is_configured():
@@ -374,7 +405,7 @@ def reconcile_delivery_replicas_task():
     return {"replication_queued": len(unsynced), "verification_queued": len(stale)}
 
 
-@shared_task(name="orders.tasks.build_delivery_recovery_export_task")
+@shared_task(name="orders.tasks.build_delivery_recovery_export_task", ignore_result=True)
 def build_delivery_recovery_export_task(export_id):
     try:
         export = DeliveryRecoveryExport.objects.get(pk=export_id)
@@ -410,7 +441,7 @@ def build_delivery_recovery_export_task(export_id):
         return {"export_uuid": str(export.uuid), "failed": True, "error": export.error_message}
 
 
-@shared_task(name="orders.tasks.cleanup_expired_delivery_exports_task")
+@shared_task(name="orders.tasks.cleanup_expired_delivery_exports_task", ignore_result=True)
 def cleanup_expired_delivery_exports_task():
     expired = list(
         DeliveryRecoveryExport.objects.filter(
@@ -432,7 +463,7 @@ def cleanup_expired_delivery_exports_task():
     return {"seen": len(expired), "cleaned": cleaned}
 
 
-@shared_task(name="orders.tasks.cleanup_abandoned_delivery_uploads_task")
+@shared_task(name="orders.tasks.cleanup_abandoned_delivery_uploads_task", ignore_result=True)
 def cleanup_abandoned_delivery_uploads_task():
     """Remove failed and never-confirmed uploads after clients have had time to retry."""
     cutoff = timezone.now() - timedelta(hours=24)

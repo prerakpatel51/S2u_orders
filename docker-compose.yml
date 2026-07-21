@@ -35,7 +35,24 @@ services:
 
   worker:
     build: .
-    command: celery -A config worker -l INFO --concurrency=2
+    command: celery -A config worker -l INFO --queues short --concurrency=2 --prefetch-multiplier=1
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/orders
+      REDIS_URL: redis://redis:6379/0
+      DJANGO_SECRET_KEY: local-dev-secret
+      DJANGO_DEBUG: "1"
+      RUN_MIGRATIONS: "0"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  long-worker:
+    build: .
+    command: celery -A config worker -l INFO --queues long --concurrency=1 --prefetch-multiplier=1
     env_file:
       - .env
     environment:

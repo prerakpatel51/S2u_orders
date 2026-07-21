@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from django.contrib import admin
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 from openpyxl import load_workbook
@@ -65,6 +66,8 @@ from .tasks import (
     reconcile_monthly_totals_task,
     recover_interrupted_runs,
     resolve_worker_interruptions,
+    runtime_heartbeat_task,
+    send_monitoring_heartbeat,
     sync_receipts_task,
 )
 
@@ -2187,3 +2190,88 @@ class DeliveryProofTests(TestCase):
         self.assertEqual(
             [call.args[1] for call in write_object.call_args_list], [delivery_key, backup_key]
         )
+
+
+class RuntimeHealthTests(TestCase):
+    @patch("orders.views.Redis.from_url")
+    def test_dependency_health_requires_database_and_redis(self, from_url):
+        from_url.return_value.ping.return_value = True
+
+        response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["checks"], {"database": True, "redis": True})
+
+    @patch("orders.views.Redis.from_url")
+    def test_dependency_health_reports_redis_failure(self, from_url):
+        from redis.exceptions import RedisError
+
+        from_url.return_value.ping.side_effect = RedisError("broker unavailable")
+
+        response = self.client.get("/api/health/")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.json()["checks"]["redis"])
+        self.assertIn("broker unavailable", response.json()["errors"]["redis"])
+
+    @patch("orders.views.Redis.from_url")
+    def test_runtime_health_requires_recent_worker_and_beat_heartbeat(self, from_url):
+        from_url.return_value.ping.return_value = True
+        runtime_heartbeat_task()
+
+        response = self.client.get("/api/health/runtime/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["checks"]["runtime"])
+
+    @override_settings(RUNTIME_HEARTBEAT_STALE_SECONDS=60)
+    @patch("orders.views.Redis.from_url")
+    def test_runtime_health_rejects_stale_heartbeat(self, from_url):
+        from_url.return_value.ping.return_value = True
+        SystemSetting.objects.create(
+            key="runtime_heartbeat",
+            value={"checked_at": (timezone.now() - timedelta(minutes=5)).isoformat()},
+        )
+
+        response = self.client.get("/api/health/runtime/")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.json()["checks"]["runtime"])
+
+    def test_runtime_heartbeat_records_worker_and_beat_progress(self):
+        runtime_heartbeat_task()
+
+        heartbeat = SystemSetting.objects.get(key="runtime_heartbeat")
+        self.assertIn("checked_at", heartbeat.value)
+
+    @patch.dict(
+        "os.environ",
+        {"MONITORING_RUNTIME_HEARTBEAT_URL": "https://monitor.example/heartbeat"},
+    )
+    @patch("orders.tasks.requests.post")
+    def test_external_heartbeat_is_optional_and_provider_neutral(self, post):
+        post.return_value.raise_for_status.return_value = None
+
+        self.assertTrue(send_monitoring_heartbeat("runtime"))
+
+        post.assert_called_once_with("https://monitor.example/heartbeat", timeout=3)
+
+    @patch("orders.management.commands.wait_for_redis.Redis.from_url")
+    def test_wait_for_redis_command_succeeds_after_ping(self, from_url):
+        from_url.return_value.ping.return_value = True
+
+        call_command("wait_for_redis", timeout=1)
+
+        from_url.return_value.ping.assert_called_once_with()
+
+    def test_celery_configuration_avoids_result_keys_and_routes_long_jobs(self):
+        from django.conf import settings
+
+        self.assertTrue(settings.CELERY_TASK_IGNORE_RESULT)
+        self.assertIsNone(settings.CELERY_RESULT_BACKEND)
+        self.assertEqual(settings.CELERY_WORKER_PREFETCH_MULTIPLIER, 1)
+        self.assertEqual(
+            settings.CELERY_TASK_ROUTES["orders.tasks.reconcile_monthly_totals_task"]["queue"],
+            "long",
+        )
+        self.assertEqual(settings.CELERY_BEAT_SCHEDULE["sync-korona-stores"]["schedule"], 1800.0)
