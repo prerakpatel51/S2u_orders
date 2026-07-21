@@ -128,6 +128,8 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = IS_RAILWAY and not DEBUG
 SECURE_HSTS_PRELOAD = IS_RAILWAY and not DEBUG
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+METRICS_BEARER_TOKEN = os.getenv("METRICS_BEARER_TOKEN", "").strip()
+METRICS_RETENTION_DAYS = max(2, int(os.getenv("METRICS_RETENTION_DAYS", "30")))
 CELERY_BROKER_URL = REDIS_URL
 # Task state is persisted in PostgreSQL by the application. No caller reads a
 # Celery return value, so keeping a second copy in Redis only adds keys and RDB
@@ -217,6 +219,10 @@ CELERY_BEAT_SCHEDULE = {
     "cleanup-expired-delivery-exports": {
         "task": "orders.tasks.cleanup_expired_delivery_exports_task",
         "schedule": crontab(hour=3, minute=10),
+    },
+    "cleanup-observability-metrics": {
+        "task": "orders.tasks.cleanup_observability_metrics_task",
+        "schedule": crontab(hour=3, minute=40),
     },
 }
 

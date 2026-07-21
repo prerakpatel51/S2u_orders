@@ -104,7 +104,9 @@ Create PostgreSQL and Redis services, then create Web, short Worker, long Worker
 
 Set the variables from `.env.example` on every service. Set `RUN_MIGRATIONS=1` only on the Railway Web service and `RUN_MIGRATIONS=0` on both Workers and Beat. Local Compose uses a dedicated one-shot migration service before application containers start. Worker and Beat startup performs a bounded Redis readiness check and exits on failure so Railway can restart and alert on the failed process.
 
-Configure the Web service deployment healthcheck as `/api/health/`. Railway uses this during deployment; continuous external monitoring should poll `/api/health/runtime/`, which also requires a recent task published by Beat and consumed by the short Worker. Optional `MONITORING_*_HEARTBEAT_URL` variables can notify Better Stack, UptimeRobot, or another POST-compatible heartbeat provider.
+Configure the Web service deployment healthcheck as `/ready`. `/live` checks only that Django can answer, while `/ready` requires both PostgreSQL and Redis. Continuous external monitoring should poll `/api/health/runtime/`, which also requires a recent task published by Beat and consumed by the short Worker. Optional `MONITORING_*_HEARTBEAT_URL` variables can notify Better Stack, UptimeRobot, or another POST-compatible heartbeat provider.
+
+Prometheus-compatible application metrics are exposed at `/metrics`. They aggregate normalized Django request counts and latency, Celery task duration and failures, KORONA request errors, and live `short`/`long` Redis queue depth. Set `METRICS_BEARER_TOKEN` to require `Authorization: Bearer <token>` from the scraper. Request and task metric rows are retained for `METRICS_RETENTION_DAYS` (30 by default), while the endpoint reports a rolling 24-hour window.
 
 The Redis service is a disposable Celery broker: PostgreSQL remains the system of record. Do not use an every-minute `--save 60 1` snapshot policy. Either run the broker without persistence/volume, or use a less aggressive RDB policy such as `--save 900 1 --save 300 10 --save 60 10000` and monitor restart count and snapshot latency.
 

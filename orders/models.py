@@ -308,6 +308,16 @@ class ApiRequestLog(TimeStampedModel):
     latency_ms = models.PositiveIntegerField(default=0)
 
 
+class TaskExecutionMetric(TimeStampedModel):
+    task_id = models.CharField(max_length=255, unique=True)
+    task_name = models.CharField(max_length=255, db_index=True)
+    status = models.CharField(max_length=32, db_index=True)
+    duration_ms = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        indexes = [models.Index(fields=["created_at", "task_name", "status"])]
+
+
 class Delivery(TimeStampedModel):
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"

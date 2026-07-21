@@ -38,6 +38,7 @@ from .models import (
     Store,
     SystemSetting,
     SystemLog,
+    TaskExecutionMetric,
     SyncState,
     SyncRun,
 )
@@ -67,6 +68,8 @@ from .tasks import (
     recover_interrupted_runs,
     resolve_worker_interruptions,
     runtime_heartbeat_task,
+    record_task_finish,
+    record_task_start,
     send_monitoring_heartbeat,
     sync_receipts_task,
 )
@@ -2193,6 +2196,21 @@ class DeliveryProofTests(TestCase):
 
 
 class RuntimeHealthTests(TestCase):
+    def test_liveness_does_not_probe_dependencies(self):
+        response = self.client.get("/live")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["checks"], {"process": True})
+
+    @patch("orders.views.Redis.from_url")
+    def test_readiness_is_an_alias_for_dependency_health(self, from_url):
+        from_url.return_value.ping.return_value = True
+
+        response = self.client.get("/ready")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["checks"], {"database": True, "redis": True})
+
     @patch("orders.views.Redis.from_url")
     def test_dependency_health_requires_database_and_redis(self, from_url):
         from_url.return_value.ping.return_value = True
@@ -2275,3 +2293,68 @@ class RuntimeHealthTests(TestCase):
             "long",
         )
         self.assertEqual(settings.CELERY_BEAT_SCHEDULE["sync-korona-stores"]["schedule"], 1800.0)
+
+    def test_request_middleware_persists_normalized_route_metrics(self):
+        response = self.client.get("/api/orders/999/")
+
+        self.assertEqual(response.status_code, 403)
+        metric = ApiRequestLog.objects.get(service="django")
+        self.assertEqual(metric.url_path, "api/orders/<int:pk>/")
+        self.assertEqual(metric.status_code, 403)
+
+    def test_celery_signals_persist_duration_and_failure(self):
+        task = Mock(name="task")
+        task.name = "orders.tasks.example"
+        with patch("orders.tasks.time.monotonic", side_effect=[10.0, 12.5]):
+            record_task_start(task_id="metric-task-id")
+            record_task_finish(task_id="metric-task-id", task=task, state="FAILURE")
+
+        metric = TaskExecutionMetric.objects.get(task_id="metric-task-id")
+        self.assertEqual(metric.task_name, "orders.tasks.example")
+        self.assertEqual(metric.status, "FAILURE")
+        self.assertEqual(metric.duration_ms, 2500)
+
+    @patch("orders.metrics.Redis.from_url")
+    def test_prometheus_metrics_cover_requests_tasks_queues_and_korona_errors(self, from_url):
+        ApiRequestLog.objects.create(
+            service="django",
+            method="GET",
+            url_path="api/orders/<int:pk>/",
+            status_code=200,
+            latency_ms=250,
+        )
+        ApiRequestLog.objects.create(
+            service="korona",
+            method="GET",
+            url_path="/accounts/{account}/products",
+            status_code=503,
+            latency_ms=900,
+        )
+        TaskExecutionMetric.objects.create(
+            task_id="failed-task",
+            task_name="orders.tasks.sync_products_task",
+            status="FAILURE",
+            duration_ms=1500,
+        )
+        from_url.return_value.llen.side_effect = lambda queue: {"short": 3, "long": 1}[queue]
+        from_url.return_value.zcard.return_value = 2
+
+        response = self.client.get("/metrics")
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('s2u_http_requests_24h{method="GET",route="api/orders/<int:pk>/",status="200"} 1.0', body)
+        self.assertIn('s2u_celery_task_failures_24h{task="orders.tasks.sync_products_task"} 1.0', body)
+        self.assertIn('s2u_celery_queue_depth{queue="short"} 3.0', body)
+        self.assertIn('s2u_celery_queue_depth{queue="long"} 1.0', body)
+        self.assertIn('s2u_korona_errors_24h{method="GET",status="503"} 1.0', body)
+
+    @override_settings(METRICS_BEARER_TOKEN="scrape-secret")
+    @patch("orders.metrics.Redis.from_url")
+    def test_metrics_bearer_token_is_enforced_when_configured(self, from_url):
+        from_url.return_value.llen.return_value = 0
+        from_url.return_value.zcard.return_value = 0
+
+        self.assertEqual(self.client.get("/metrics").status_code, 401)
+        authorized = self.client.get("/metrics", HTTP_AUTHORIZATION="Bearer scrape-secret")
+        self.assertEqual(authorized.status_code, 200)

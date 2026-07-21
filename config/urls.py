@@ -5,6 +5,9 @@ from django.urls import include, path
 from orders import delivery_views, views
 
 urlpatterns = [
+    path("live", views.LivenessAPIView.as_view(), name="live"),
+    path("ready", views.ReadinessAPIView.as_view(), name="ready"),
+    path("metrics", views.MetricsAPIView.as_view(), name="metrics"),
     path("admin/", admin.site.urls),
     path("login/", auth_views.LoginView.as_view(template_name="registration/login.html"), name="login"),
     path("logout/", auth_views.LogoutView.as_view(), name="logout"),

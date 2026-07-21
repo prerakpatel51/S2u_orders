@@ -1,3 +1,4 @@
+import hmac
 from datetime import date, datetime, timedelta
 
 from django.conf import settings
@@ -8,6 +9,7 @@ from django.contrib.postgres.search import TrigramSimilarity
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
 from django.db.models import Avg, Count, F, Max, Q, Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.generic import TemplateView
@@ -27,6 +29,7 @@ from .exports import (
     xlsx_response,
 )
 from .delivery_storage import bucket_health_snapshot
+from .metrics import render_metrics
 from .models import (
     ApiRequestLog,
     BulkOrderItem,
@@ -946,7 +949,7 @@ class ServicesAPIView(APIView):
             for row in controls
             if row.status == ServiceControl.Status.ERROR
         ]
-        api_requests_24h = ApiRequestLog.objects.filter(created_at__gte=since)
+        api_requests_24h = ApiRequestLog.objects.filter(service="korona", created_at__gte=since)
         api_summary = api_requests_24h.aggregate(
             requests=Count("id"),
             errors=Count("id", filter=Q(status_code__gte=400)),
@@ -1031,7 +1034,9 @@ class ServicesAPIView(APIView):
                     "errors": service_statuses.count(ServiceControl.Status.ERROR),
                     "records_checked_24h": daily_run_totals["seen"] or 0,
                     "records_changed_24h": records_changed_24h,
-                    "api_errors_24h": ApiRequestLog.objects.filter(created_at__gte=since, status_code__gte=400).count(),
+                    "api_errors_24h": ApiRequestLog.objects.filter(
+                        service="korona", created_at__gte=since, status_code__gte=400
+                    ).count(),
                     "attention": attention,
                 },
                 "counts": {
@@ -1351,6 +1356,36 @@ class HealthAPIView(APIView):
         return Response(
             {"status": "ok" if healthy else "unavailable", "checks": checks, "errors": errors},
             status=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+
+class LivenessAPIView(APIView):
+    """Process-only check; dependency failures must not trigger a restart."""
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        return Response({"status": "ok", "checks": {"process": True}})
+
+
+class ReadinessAPIView(HealthAPIView):
+    """Routing check requiring both Postgres and Redis."""
+
+
+class MetricsAPIView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        expected = settings.METRICS_BEARER_TOKEN
+        if expected:
+            supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
+            if not hmac.compare_digest(supplied, expected):
+                return Response({"detail": "Invalid metrics token."}, status=401)
+        return HttpResponse(
+            render_metrics(),
+            content_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
 

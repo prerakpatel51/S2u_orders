@@ -1,12 +1,13 @@
 import logging
 import os
+import time
 from datetime import timedelta
 
 import requests
 from celery import shared_task
-from celery.signals import worker_ready
+from celery.signals import task_postrun, task_prerun, worker_ready
 from django.conf import settings
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -21,6 +22,7 @@ from .delivery_storage import (
     verify_asset_replica,
 )
 from .models import (
+    ApiRequestLog,
     DeliveryAsset,
     DeliveryAssetReplica,
     DeliveryBackup,
@@ -29,6 +31,7 @@ from .models import (
     SyncRun,
     SystemSetting,
     SystemLog,
+    TaskExecutionMetric,
 )
 from .services import reconcile_monthly_needs, reconcile_stocks, sync_products, sync_receipts, sync_stocks, sync_stores
 
@@ -50,6 +53,32 @@ SERVICE_LOCK_TIMEOUTS = {
     "monthly_reconciliation": timedelta(hours=4),
 }
 INTERRUPTED_MESSAGE = "Worker stopped before this job completed. Run it again when ready."
+TASK_START_TIMES = {}
+
+
+@task_prerun.connect
+def record_task_start(task_id=None, **_kwargs):
+    if task_id:
+        TASK_START_TIMES[task_id] = time.monotonic()
+
+
+@task_postrun.connect
+def record_task_finish(task_id=None, task=None, state=None, **_kwargs):
+    """Persist cross-process Celery metrics without affecting task execution."""
+    started = TASK_START_TIMES.pop(task_id, None)
+    if not task_id or started is None:
+        return
+    try:
+        TaskExecutionMetric.objects.update_or_create(
+            task_id=task_id,
+            defaults={
+                "task_name": getattr(task, "name", "unknown") or "unknown",
+                "status": (state or "UNKNOWN").upper(),
+                "duration_ms": max(0, round((time.monotonic() - started) * 1000)),
+            },
+        )
+    except DatabaseError:
+        logger.warning("Could not persist Celery task metric", exc_info=True)
 
 
 def send_monitoring_heartbeat(name, *, failed=False):
@@ -301,6 +330,14 @@ def runtime_heartbeat_task():
         defaults={"value": {"checked_at": checked_at.isoformat()}},
     )
     send_monitoring_heartbeat("runtime")
+
+
+@shared_task(name="orders.tasks.cleanup_observability_metrics_task", ignore_result=True)
+def cleanup_observability_metrics_task():
+    cutoff = timezone.now() - timedelta(days=settings.METRICS_RETENTION_DAYS)
+    request_rows, _ = ApiRequestLog.objects.filter(created_at__lt=cutoff).delete()
+    task_rows, _ = TaskExecutionMetric.objects.filter(created_at__lt=cutoff).delete()
+    return {"request_metrics_deleted": request_rows, "task_metrics_deleted": task_rows}
 
 
 @shared_task(name="orders.tasks.backup_delivery_metadata_task", ignore_result=True)
