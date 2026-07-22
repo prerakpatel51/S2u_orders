@@ -363,6 +363,7 @@ async function loadOrder() {
     getRowId: params => String(params.data.id),
     onCellValueChanged: saveCell,
     onCellKeyDown: handleCellKeyDown,
+    onCellMouseDown: clearGridTextSelection,
     onColumnMoved: queuePreference,
     onColumnResized: event => { if (event.finished) queuePreference(); },
     onColumnVisible: () => {
@@ -392,23 +393,33 @@ function handleCellKeyDown(event) {
   event.node.setDataValue('on_shelf_quantity', next);
 }
 
+function clearGridTextSelection(event) {
+  if (event.event?.target?.closest?.('input, textarea, [contenteditable="true"]')) return;
+  window.getSelection()?.removeAllRanges();
+}
+
 function handleGridCopy(event) {
   const target = event.target instanceof Element ? event.target : null;
   const editor = target?.closest('input, textarea, [contenteditable="true"]');
   const editorHasSelection = editor && editor.selectionStart !== undefined && editor.selectionStart !== editor.selectionEnd;
-  if (window.getSelection()?.toString() || editorHasSelection) return;
+  if (editorHasSelection) return;
 
-  const cell = target?.closest('.ag-cell') || gridElement.querySelector('.ag-cell-focus');
-  const text = cell?.innerText?.trim();
+  const focusedCell = gridApi?.getFocusedCell();
+  const rowNode = focusedCell && !focusedCell.rowPinned ? gridApi.getDisplayedRowAtIndex(focusedCell.rowIndex) : null;
+  const text = rowNode && focusedCell.column.getColId() !== 'delete'
+    ? String(gridPdfCellValue(rowNode, focusedCell.column)).trim()
+    : '';
   if (!text || !event.clipboardData) return;
 
-  // Writing through the synchronous copy event works in every supported browser
-  // and does not depend on Clipboard API permissions in the deployed site.
+  // Capture the copy event before AG Grid can consume it, and copy from the
+  // focused row/column model so pinned columns and custom renderers are reliable.
   event.clipboardData.setData('text/plain', text);
   event.preventDefault();
+  window.getSelection()?.removeAllRanges();
+  showToast('Cell copied');
 }
 
-gridElement.addEventListener('copy', handleGridCopy);
+gridElement.addEventListener('copy', handleGridCopy, true);
 
 async function saveCell(event) {
   if (event.colDef.field === 'supplier_name') {
@@ -698,7 +709,7 @@ function gridPdfCellValue(node, column) {
   if (colId === 'transfer_store') return (node.data.transfers || []).map(item => item.from_store_number).join(', ');
   if (colId === 'transfer_to') return (node.data.transfers || []).length ? orderData.order.store.number : '';
   if (colId === 'transfer_quantity') return (node.data.transfers || []).map(item => Number(item.quantity).toLocaleString()).join(' + ');
-  const value = gridApi.getValue(column, node);
+  const value = gridApi.getCellValue({rowNode: node, colKey: column});
   if (value && typeof value === 'object' && 'stock' in value) {
     return `${Number(value.stock || 0).toLocaleString()}\n${Number(value.monthly_needed || 0).toLocaleString()}/m`;
   }
