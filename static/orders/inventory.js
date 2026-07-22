@@ -14,6 +14,19 @@ let gridApi;
 let displayedProducts = new Map();
 let rawSuggestions = [];
 let searchCategoryFilter;
+let cameraStream;
+let cameraScanner;
+let cameraScanInProgress = false;
+let cameraScanAttempts = 0;
+let cameraZoomTrack;
+let cameraUsesHardwareZoom = false;
+let cameraZoomMin = 1;
+let cameraZoomMax = 3;
+let cameraZoomStep = 0.1;
+let cameraPinchGesture = null;
+let cameraTorchSupported = false;
+let cameraTorchOn = false;
+let cameraContinuousFocus = false;
 
 const escapeHtml = value => { const el = document.createElement('div'); el.textContent = value ?? ''; return el.innerHTML; };
 const formatNumber = value => Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: 3});
@@ -136,15 +149,20 @@ async function addProducts(products) {
 searchInput.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(searchProducts, 220); });
 document.getElementById('inventory-search-field').addEventListener('change', applySuggestionFilters);
 document.getElementById('inventory-hide-added').addEventListener('change', applySuggestionFilters);
-document.getElementById('inventory-barcode-photo').addEventListener('change', async event => {
-  const file = event.target.files?.[0]; if (!file) return;
-  if (!window.Html5Qrcode) { showToast('Photo scanner did not load. Check your connection and try again.', true); return; }
-  showToast('Reading barcode…');
-  try {
-    const scanner = new Html5Qrcode('inventory-file-reader');
-    searchInput.value = await scanner.scanFile(file, true); event.target.value = ''; searchProducts();
-  } catch (_) { event.target.value = ''; showToast('No barcode found. Center it in good light and try again.', true); }
-});
+document.getElementById('camera-button').addEventListener('click', startCamera);
+document.getElementById('camera-close').addEventListener('click', stopCamera);
+document.getElementById('barcode-photo').addEventListener('change', scanBarcodePhoto);
+document.getElementById('camera-zoom').addEventListener('input', updateCameraZoom);
+document.getElementById('camera-zoom-out').addEventListener('click', () => adjustCameraZoom(-1));
+document.getElementById('camera-zoom-in').addEventListener('click', () => adjustCameraZoom(1));
+document.getElementById('camera-torch').addEventListener('click', toggleCameraTorch);
+document.getElementById('camera-dialog').addEventListener('cancel', event => { event.preventDefault(); stopCamera(); });
+const cameraVideoFrame = document.getElementById('camera-video-frame');
+cameraVideoFrame.addEventListener('touchstart', startCameraPinch, {passive: false});
+cameraVideoFrame.addEventListener('touchmove', moveCameraPinch, {passive: false});
+cameraVideoFrame.addEventListener('touchend', endCameraPinch);
+cameraVideoFrame.addEventListener('touchcancel', endCameraPinch);
+window.addEventListener('pagehide', () => { cameraStream?.getTracks().forEach(track => track.stop()); });
 searchInput.addEventListener('keydown', event => {
   if (event.key === 'ArrowDown' && suggestions.length) { event.preventDefault(); suggestionIndex = Math.min(suggestionIndex + 1, suggestions.length - 1); if (event.shiftKey) selectKeyboardProduct(suggestions[suggestionIndex], suggestionIndex); else renderSuggestions(); }
   else if (event.key === 'ArrowUp' && suggestions.length) { event.preventDefault(); suggestionIndex = Math.max(suggestionIndex - 1, 0); if (event.shiftKey) selectKeyboardProduct(suggestions[suggestionIndex], suggestionIndex); else renderSuggestions(); }
@@ -165,5 +183,235 @@ results.addEventListener('click', event => {
 addButton.addEventListener('click', () => addProducts([...selected.values()]));
 document.getElementById('clear-inventory').addEventListener('click', () => { displayedProducts.clear(); if (gridApi) gridApi.setGridOption('rowData', []); updateEmpty(); searchInput.focus(); });
 document.addEventListener('click', event => { if (!event.target.closest('.inventory-search-wrap')) results.hidden = true; });
+
+async function startCamera() {
+  const dialog = document.getElementById('camera-dialog'); const status = document.getElementById('camera-status');
+  if (!dialog.open) dialog.showModal();
+  status.textContent = 'Starting camera…';
+  if (!window.isSecureContext && location.hostname !== 'localhost') { status.textContent = 'Live preview needs HTTPS on phones. Use “Take photo” below instead.'; return; }
+  if (!navigator.mediaDevices?.getUserMedia) { status.textContent = 'This browser cannot open a live camera. Use “Take barcode photo” below instead.'; return; }
+  if (!('BarcodeDetector' in window)) {
+    await startCompatibleCameraScanner(status);
+    return;
+  }
+  try {
+    useNativeCameraView(true);
+    cameraStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: 'environment'}, width: {ideal: 1920}, height: {ideal: 1080}, frameRate: {ideal: 30}}});
+    const video = document.getElementById('camera-video'); video.srcObject = cameraStream;
+    await video.play().catch(() => {});
+    status.textContent = 'Scanning… Pinch or use the controls to zoom.';
+    setupCameraZoom(cameraStream.getVideoTracks()[0]);
+    cameraScanAttempts = 0;
+    const detector = new BarcodeDetector({formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128']});
+    const scan = async () => {
+      if (!cameraStream || cameraScanInProgress) return;
+      cameraScanInProgress = true;
+      try {
+        const codes = await detector.detect(video);
+        cameraScanAttempts += 1;
+        if (codes.length) {
+          if (await handleDetectedCameraCode(codes[0].rawValue, status)) return;
+        } else if (cameraScanAttempts % 60 === 0) {
+          status.textContent = 'Still scanning — hold the barcode steady in good light.';
+        }
+      } catch (_) {
+        // A missed frame is normal on phone cameras; continue trying instead of closing.
+      } finally {
+        cameraScanInProgress = false;
+      }
+      if (cameraStream) setTimeout(() => requestAnimationFrame(scan), 180);
+    };
+    scan();
+  } catch (error) { status.textContent = cameraErrorMessage(error); }
+}
+
+async function startCompatibleCameraScanner(status) {
+  if (!window.Html5Qrcode) { status.textContent = 'The iPhone-compatible scanner did not load. Check your connection or use “Take barcode photo” below.'; return; }
+  useNativeCameraView(false);
+  try {
+    const formats = window.Html5QrcodeSupportedFormats ? [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.CODE_128] : undefined;
+    cameraScanner = new Html5Qrcode('camera-live-reader', formats ? {formatsToSupport: formats, verbose: false} : {verbose: false});
+    await cameraScanner.start(
+      {facingMode: 'environment'},
+      {fps: 10, disableFlip: true},
+      async code => {
+        if (cameraScanInProgress) return;
+        cameraScanInProgress = true;
+        try { await handleDetectedCameraCode(code, status); }
+        finally { cameraScanInProgress = false; }
+      },
+      () => {}
+    );
+    await optimizeCompatibleCameraTrack();
+    setupCameraZoom(null);
+    status.textContent = 'Scanning… Pinch or use the controls to zoom.';
+  } catch (error) {
+    await clearCompatibleCameraScanner();
+    status.textContent = cameraErrorMessage(error);
+  }
+}
+
+async function optimizeCompatibleCameraTrack() {
+  if (!cameraScanner?.applyVideoConstraints) return;
+  let capabilities = {};
+  try { capabilities = cameraScanner.getRunningTrackCapabilities?.() || {}; } catch (_) {}
+  const continuousFocus = Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous');
+  const constraints = {width: {ideal: 1280}, height: {ideal: 720}};
+  if (continuousFocus) constraints.advanced = [{focusMode: 'continuous'}];
+  try { await cameraScanner.applyVideoConstraints(constraints); }
+  catch (_) {
+    if (continuousFocus) {
+      try { await cameraScanner.applyVideoConstraints({advanced: [{focusMode: 'continuous'}]}); } catch (_) {}
+    }
+  }
+}
+
+async function handleDetectedCameraCode(code, status) {
+  status.textContent = 'Checking barcode…';
+  const products = await apiFetch(`/api/products/search/?q=${encodeURIComponent(code)}`);
+  const product = exactBarcodeProduct(products, code);
+  if (!product) { status.textContent = 'That barcode was not recognized. Keep it centered and we will keep trying.'; return false; }
+  searchInput.value = code;
+  await stopCamera();
+  await addProducts([product]);
+  return true;
+}
+
+function useNativeCameraView(native) {
+  document.getElementById('camera-video').hidden = !native;
+  document.getElementById('camera-live-reader').hidden = native;
+}
+
+function cameraErrorMessage(error) {
+  const detail = String(error?.message || error || '').toLowerCase();
+  if (error?.name === 'NotAllowedError' || detail.includes('permission') || detail.includes('notallowed')) return 'Camera access was blocked. On iPhone, open Settings › Safari › Camera and allow access, then try again.';
+  if (error?.name === 'NotFoundError' || detail.includes('not found') || detail.includes('notfound')) return 'No rear camera was found. Use “Take barcode photo” below instead.';
+  return `Camera unavailable: ${error?.message || error}`;
+}
+
+async function scanBarcodePhoto(event) {
+  const file = event.target.files?.[0]; if (!file) return;
+  const status = document.getElementById('camera-status'); status.textContent = 'Reading barcode from photo…';
+  if (!window.Html5Qrcode) { status.textContent = 'Photo scanner did not load. Check your connection and try again.'; return; }
+  const scanner = new Html5Qrcode('camera-file-reader');
+  try {
+    const code = await scanner.scanFile(file, true);
+    searchInput.value = code; event.target.value = ''; await stopCamera(); await searchProducts();
+  } catch (_) { status.textContent = 'No barcode found. Try again with the barcode centered and in good light.'; event.target.value = ''; }
+}
+
+function setupCameraZoom(track) {
+  const slider = document.getElementById('camera-zoom');
+  let capabilities = {}; let settings = {};
+  try { capabilities = track?.getCapabilities?.() || cameraScanner?.getRunningTrackCapabilities?.() || {}; } catch (_) {}
+  try { settings = track?.getSettings?.() || cameraScanner?.getRunningTrackSettings?.() || {}; } catch (_) {}
+  cameraZoomTrack = track;
+  cameraUsesHardwareZoom = Boolean(capabilities.zoom && Number.isFinite(Number(capabilities.zoom.min)) && Number.isFinite(Number(capabilities.zoom.max)));
+  cameraZoomMin = cameraUsesHardwareZoom ? Number(capabilities.zoom.min) : 1;
+  cameraZoomMax = cameraUsesHardwareZoom ? Number(capabilities.zoom.max) : 3;
+  cameraZoomStep = cameraUsesHardwareZoom ? Number(capabilities.zoom.step || 0.1) : 0.1;
+  slider.min = cameraZoomMin; slider.max = cameraZoomMax; slider.step = cameraZoomStep;
+  slider.value = cameraUsesHardwareZoom && Number.isFinite(Number(settings.zoom)) ? settings.zoom : cameraZoomMin;
+  cameraTorchSupported = capabilities.torch === true;
+  cameraTorchOn = false;
+  cameraContinuousFocus = Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous');
+  const torchButton = document.getElementById('camera-torch');
+  torchButton.hidden = !cameraTorchSupported; torchButton.setAttribute('aria-pressed', 'false');
+  updateCameraZoom();
+  if (cameraContinuousFocus && !cameraUsesHardwareZoom) applyCameraConstraints({focusMode: 'continuous'}).catch(() => {});
+}
+
+function clampCameraZoom(value) { return Math.max(cameraZoomMin, Math.min(cameraZoomMax, value)); }
+
+function updateCameraZoomDisplay(value) {
+  const decimals = Math.abs(value - Math.round(value)) < .01 ? 0 : 1;
+  document.getElementById('camera-zoom-value').textContent = `${value.toFixed(decimals)}×`;
+  document.getElementById('camera-zoom-out').disabled = value <= cameraZoomMin + .001;
+  document.getElementById('camera-zoom-in').disabled = value >= cameraZoomMax - .001;
+}
+
+function applyCameraPreviewScale(value) {
+  const scale = cameraUsesHardwareZoom ? 1 : value;
+  document.getElementById('camera-video').style.transform = `scale(${scale})`;
+  const compatibleVideo = document.querySelector('#camera-live-reader video');
+  if (compatibleVideo) compatibleVideo.style.transform = `scale(${scale})`;
+}
+
+async function applyCameraConstraints(values) {
+  const preferred = {...values};
+  if (cameraContinuousFocus && preferred.focusMode === undefined) preferred.focusMode = 'continuous';
+  if (cameraUsesHardwareZoom && preferred.zoom === undefined) preferred.zoom = Number(document.getElementById('camera-zoom').value);
+  if (cameraTorchSupported && preferred.torch === undefined) preferred.torch = cameraTorchOn;
+  const constraints = {advanced: [preferred]};
+  if (cameraZoomTrack) return cameraZoomTrack.applyConstraints(constraints);
+  if (cameraScanner?.applyVideoConstraints) return cameraScanner.applyVideoConstraints(constraints);
+  throw new Error('No active camera track');
+}
+
+async function updateCameraZoom() {
+  const slider = document.getElementById('camera-zoom');
+  const value = clampCameraZoom(Number(slider.value || cameraZoomMin));
+  slider.value = value; updateCameraZoomDisplay(value); applyCameraPreviewScale(value);
+  if (cameraUsesHardwareZoom) {
+    try { await applyCameraConstraints({zoom: value}); }
+    catch (_) {
+      document.getElementById('camera-video').style.transform = `scale(${value})`;
+      const compatibleVideo = document.querySelector('#camera-live-reader video');
+      if (compatibleVideo) compatibleVideo.style.transform = `scale(${value})`;
+    }
+  }
+}
+
+function adjustCameraZoom(direction) {
+  const slider = document.getElementById('camera-zoom');
+  const buttonStep = Math.max(cameraZoomStep, (cameraZoomMax - cameraZoomMin) / 8, .25);
+  slider.value = clampCameraZoom(Number(slider.value) + direction * buttonStep);
+  updateCameraZoom();
+}
+
+function cameraTouchDistance(touches) { return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY); }
+function startCameraPinch(event) {
+  if (event.touches.length !== 2) return;
+  cameraPinchGesture = {distance: cameraTouchDistance(event.touches), zoom: Number(document.getElementById('camera-zoom').value)};
+  event.preventDefault();
+}
+function moveCameraPinch(event) {
+  if (!cameraPinchGesture || event.touches.length !== 2) return;
+  const distance = cameraTouchDistance(event.touches);
+  if (!cameraPinchGesture.distance) return;
+  const slider = document.getElementById('camera-zoom');
+  slider.value = clampCameraZoom(cameraPinchGesture.zoom * distance / cameraPinchGesture.distance);
+  updateCameraZoom(); event.preventDefault();
+}
+function endCameraPinch(event) { if (event.touches.length < 2) cameraPinchGesture = null; }
+
+async function toggleCameraTorch() {
+  if (!cameraTorchSupported) return;
+  const next = !cameraTorchOn;
+  try {
+    await applyCameraConstraints({torch: next}); cameraTorchOn = next;
+    document.getElementById('camera-torch').setAttribute('aria-pressed', String(next));
+  } catch (_) {
+    cameraTorchSupported = false; document.getElementById('camera-torch').hidden = true;
+  }
+}
+
+async function clearCompatibleCameraScanner() {
+  const scanner = cameraScanner; cameraScanner = null;
+  if (!scanner) return;
+  try { await scanner.stop(); } catch (_) {}
+  try { scanner.clear(); } catch (_) {}
+}
+
+async function stopCamera() {
+  cameraStream?.getTracks().forEach(track => track.stop()); cameraStream = null;
+  await clearCompatibleCameraScanner();
+  cameraScanInProgress = false; cameraZoomTrack = null; cameraUsesHardwareZoom = false; cameraPinchGesture = null; cameraTorchSupported = false; cameraTorchOn = false; cameraContinuousFocus = false;
+  const video = document.getElementById('camera-video'); video.srcObject = null; video.style.transform = 'scale(1)';
+  document.getElementById('camera-torch').hidden = true;
+  const compatibleVideo = document.querySelector('#camera-live-reader video'); if (compatibleVideo) compatibleVideo.style.transform = 'scale(1)';
+  const dialog = document.getElementById('camera-dialog'); if (dialog.open) dialog.close();
+}
+
 updateEmpty();
 searchCategoryFilter = new SearchCategoryFilter({button:document.getElementById('inventory-search-filter-button'),panel:document.getElementById('inventory-search-filter-panel'),onChange:applySuggestionFilters,onSelectAll:()=>{suggestions.forEach(product=>selected.set(product.id,product));updateSelection();}});

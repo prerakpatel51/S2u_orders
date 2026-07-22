@@ -13,7 +13,7 @@
 
 <section class="inventory-search-band">
   <div class="product-search-wrap inventory-search-wrap">
-    <i data-lucide="search"></i><input id="inventory-search" autocomplete="off" placeholder="Search product name, number, or scan barcode" aria-label="Find products"><button id="inventory-search-filter-button" class="icon-button search-filter-button" title="Filter search"><i data-lucide="list-filter"></i></button><label class="icon-button inventory-camera-button" title="Take a barcode photo"><i data-lucide="scan-barcode"></i><input id="inventory-barcode-photo" type="file" accept="image/*" capture="environment"></label><div id="inventory-file-reader" hidden></div><div id="inventory-search-filter-panel" class="search-filter-panel" hidden></div>
+    <i data-lucide="search"></i><input id="inventory-search" autocomplete="off" placeholder="Search product name, number, or scan barcode" aria-label="Find products"><button id="inventory-search-filter-button" class="icon-button search-filter-button" title="Filter search"><i data-lucide="list-filter"></i></button><button id="camera-button" class="icon-button inventory-camera-button" type="button" title="Scan with camera"><i data-lucide="scan-barcode"></i></button><div id="inventory-search-filter-panel" class="search-filter-panel" hidden></div>
     <div id="inventory-results" class="search-results" hidden></div>
   </div>
   <select id="inventory-search-field" class="inventory-filter" aria-label="Search field"><option value="all">All fields</option><option value="name">Product name</option><option value="number">Product number</option></select>
@@ -22,9 +22,28 @@
 </section>
 <p class="inventory-help">Up/Down moves · Shift+Up/Down checks products · Enter adds · Shift+Enter checks · Shift+click selects a range · Tap checkboxes on touch screens</p>
 <section class="inventory-grid-shell"><div id="inventory-grid" class="ag-theme-quartz"></div><div id="inventory-empty" class="inventory-empty"><i data-lucide="package-search"></i><h2>Search and add products</h2><p>Each store will appear as a column with stock and monthly need.</p></div></section>
+
+<dialog id="camera-dialog" class="modal camera-modal">
+  <div class="modal-header"><div><h2>Scan barcode</h2><p>Fill the guide with one barcode and hold steady.</p></div><button id="camera-close" class="icon-button" type="button" aria-label="Close scanner"><i data-lucide="x"></i></button></div>
+  <div class="camera-video-frame" id="camera-video-frame">
+    <video id="camera-video" autoplay muted playsinline></video><div id="camera-live-reader" hidden></div>
+    <div class="camera-scan-guide" aria-hidden="true"><span></span></div>
+    <button id="camera-torch" class="camera-torch-button" type="button" aria-pressed="false" hidden><i data-lucide="flashlight"></i><span>Light</span></button>
+    <span class="camera-pinch-hint" aria-hidden="true">Pinch to zoom</span>
+  </div>
+  <div class="camera-zoom-control">
+    <button id="camera-zoom-out" type="button" aria-label="Zoom out"><i data-lucide="minus"></i></button>
+    <label for="camera-zoom"><i data-lucide="zoom-in"></i><span>Zoom</span></label>
+    <input id="camera-zoom" type="range" min="1" max="3" step="0.1" value="1" aria-label="Camera zoom">
+    <button id="camera-zoom-in" type="button" aria-label="Zoom in"><i data-lucide="plus"></i></button>
+    <output id="camera-zoom-value" for="camera-zoom">1×</output>
+  </div>
+  <p id="camera-status" role="status" aria-live="polite">Starting camera…</p>
+  <div class="camera-photo-fallback"><span>Having trouble scanning?</span><label class="secondary-button"><i data-lucide="camera"></i><span>Take barcode photo</span><input id="barcode-photo" type="file" accept="image/*" capture="environment"></label><div id="camera-file-reader" hidden></div></div>
+</dialog>
 {% endblock %}
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js"></script>
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-<script src="{% static 'orders/product_search_filters.js' %}?v=20260716a"></script><script src="{% static 'orders/inventory.js' %}?v=20260716a"></script>
+<script src="{% static 'orders/product_search_filters.js' %}?v=20260716a"></script><script src="{% static 'orders/inventory.js' %}?v=20260722b"></script>
 {% endblock %}
