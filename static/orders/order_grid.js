@@ -44,6 +44,8 @@ let gridPdfObjectUrl = '';
 let gridPdfFilename = '';
 let gridPdfPayload = null;
 let gridExportTitleTimer;
+let gridHoverPointer = null;
+let gridHoverFrame = 0;
 const batchSelectedProducts = new Map();
 
 const escapeHtml = value => { const el = document.createElement('div'); el.textContent = value ?? ''; return el.innerHTML; };
@@ -406,6 +408,24 @@ function clearGridTextSelection(event) {
   if (endpointInGrid || (sourceTarget && gridElement.contains(sourceTarget))) selection.removeAllRanges();
 }
 
+function showSingleGridRowHover(rowIndex) {
+  gridElement.querySelectorAll('.order-grid-row-hover').forEach(row => row.classList.remove('order-grid-row-hover'));
+  if (rowIndex === null) return;
+  gridElement.querySelectorAll(`.ag-row[row-index="${rowIndex}"]`).forEach(row => row.classList.add('order-grid-row-hover'));
+}
+
+function syncGridRowHover() {
+  gridHoverFrame = 0;
+  if (!gridHoverPointer) return showSingleGridRowHover(null);
+  const target = document.elementFromPoint(gridHoverPointer.x, gridHoverPointer.y);
+  const row = target && gridElement.contains(target) ? target.closest('.ag-row[row-index]') : null;
+  showSingleGridRowHover(row?.getAttribute('row-index') ?? null);
+}
+
+function scheduleGridRowHover() {
+  if (!gridHoverFrame) gridHoverFrame = requestAnimationFrame(syncGridRowHover);
+}
+
 function handleGridCopy(event) {
   const target = event.target instanceof Element ? event.target : null;
   const editor = target?.closest('input, textarea, [contenteditable="true"]');
@@ -428,7 +448,18 @@ function handleGridCopy(event) {
 }
 
 gridElement.addEventListener('copy', handleGridCopy, true);
-gridElement.addEventListener('scroll', clearGridTextSelection, true);
+gridElement.addEventListener('pointermove', event => {
+  gridHoverPointer = {x: event.clientX, y: event.clientY};
+  scheduleGridRowHover();
+});
+gridElement.addEventListener('pointerleave', () => {
+  gridHoverPointer = null;
+  scheduleGridRowHover();
+});
+gridElement.addEventListener('scroll', event => {
+  clearGridTextSelection(event);
+  scheduleGridRowHover();
+}, true);
 gridElement.addEventListener('wheel', clearGridTextSelection, {capture: true, passive: true});
 gridElement.addEventListener('touchmove', clearGridTextSelection, {capture: true, passive: true});
 document.addEventListener('selectionchange', clearGridTextSelection);

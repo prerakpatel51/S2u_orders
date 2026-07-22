@@ -32,6 +32,7 @@
 .grid-shell .ag-cell:not(.ag-cell-inline-editing),.grid-shell .ag-cell:not(.ag-cell-inline-editing) *{user-select:none;-webkit-user-select:none}
 .grid-shell .ag-cell::selection,.grid-shell .ag-cell *::selection{background:transparent;color:inherit}
 .grid-shell .ag-theme-quartz{--ag-row-hover-color:transparent}
+.grid-shell .ag-row.order-grid-row-hover::before{background-color:rgba(33,150,243,.12)!important}
 
 .destination-export-wrap .export-choice-menu{top:43px;right:0;width:190px;padding:7px}.export-choice-menu strong{display:block;padding:7px 9px 8px;font-size:12px}.export-choice-menu a{display:flex;align-items:center;gap:8px;padding:9px}.export-choice-menu a svg{width:16px;height:16px}
 .camera-photo-fallback{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.camera-photo-fallback label{display:inline-flex;cursor:pointer;white-space:nowrap;margin:0}.camera-photo-fallback input{position:absolute;width:1px!important;height:1px!important;opacity:0}
