@@ -14,6 +14,8 @@ let gridApi;
 let displayedProducts = new Map();
 let rawSuggestions = [];
 let searchCategoryFilter;
+let inventoryStores = [];
+const inventoryMobileLayout = window.matchMedia('(max-width: 700px)');
 let cameraStream;
 let cameraScanner;
 let cameraScanInProgress = false;
@@ -105,6 +107,12 @@ function pairedRenderer(params) {
   return element;
 }
 
+function mobileProductRenderer(params) {
+  const element = document.createElement('div'); element.className = 'inventory-mobile-product';
+  element.innerHTML = `<strong>${escapeHtml(params.data.name)}</strong><small>#${escapeHtml(params.data.number)}</small>`;
+  return element;
+}
+
 function removeRenderer(params) {
   const button = document.createElement('button'); button.type = 'button'; button.className = 'grid-delete'; button.title = 'Remove product'; button.textContent = '×';
   button.addEventListener('click', () => { displayedProducts.delete(params.data.id); gridApi.applyTransaction({remove: [params.data]}); updateEmpty(); });
@@ -116,22 +124,37 @@ function updateEmpty() {
 }
 
 function buildGrid(payload) {
+  inventoryStores = payload.stores;
+  const mobile = inventoryMobileLayout.matches;
   const storeColumns = payload.stores.map((store, index) => ({
-    colId: `store_${store.id}`, headerName: store.number, headerTooltip: store.name, minWidth: 94, width: 110,
+    colId: `store_${store.id}`, headerName: store.number, headerTooltip: store.name, minWidth: mobile ? 76 : 94, width: mobile ? 84 : 110,
     headerClass: `${['store-blue', 'store-green', 'store-peach', 'store-lilac', 'store-mint'][index % 5]}-header`,
     cellClass: `${['store-blue', 'store-green', 'store-peach', 'store-lilac', 'store-mint'][index % 5]}-cell`,
     valueGetter: params => params.data.stores.find(item => item.store_id === store.id), cellRenderer: pairedRenderer,
     comparator: (a, b) => gridNumberCompare(a?.stock, b?.stock),
   }));
-  const columnDefs = [
+  const removeColumn = {colId: 'remove', headerName: '', pinned: mobile ? null : 'right', width: 42, minWidth: 42, maxWidth: 42, sortable: false, filter: false, resizable: false, cellRenderer: removeRenderer};
+  const columnDefs = mobile ? [
+    {field: 'name', headerName: 'Product', pinned: 'left', lockPinned: true, minWidth: 150, width: 150, maxWidth: 150, filter: ProductNameCategoryFilter, comparator: gridNaturalCompare, cellRenderer: mobileProductRenderer},
+    ...storeColumns,
+    removeColumn,
+  ] : [
     {field: 'number', headerName: 'Product #', pinned: 'left', width: 115, filter: true, comparator: gridNaturalCompare},
     {field: 'name', headerName: 'Product name', pinned: 'left', minWidth: 210, width: 280, filter: ProductNameCategoryFilter, comparator: gridNaturalCompare},
     ...storeColumns,
-    {colId: 'remove', headerName: '', pinned: 'right', width: 42, minWidth: 42, maxWidth: 42, sortable: false, filter: false, resizable: false, cellRenderer: removeRenderer},
+    removeColumn,
   ];
-  if (!gridApi) gridApi = agGrid.createGrid(gridElement, {columnDefs, rowData: payload.products, defaultColDef: {sortable: true, resizable: true}, rowHeight: 48, getRowId: params => String(params.data.id)});
+  if (!gridApi) gridApi = agGrid.createGrid(gridElement, {columnDefs, rowData: payload.products, defaultColDef: {sortable: true, resizable: true}, rowHeight: mobile ? 58 : 48, getRowId: params => String(params.data.id)});
   else { gridApi.setGridOption('columnDefs', columnDefs); gridApi.setGridOption('rowData', [...displayedProducts.values()]); }
+  gridApi.setGridOption('rowHeight', mobile ? 58 : 48); gridApi.resetRowHeights();
 }
+
+function refreshInventoryLayout() {
+  if (!gridApi || !inventoryStores.length) return;
+  buildGrid({stores: inventoryStores, products: [...displayedProducts.values()]});
+}
+if (inventoryMobileLayout.addEventListener) inventoryMobileLayout.addEventListener('change', refreshInventoryLayout);
+else inventoryMobileLayout.addListener(refreshInventoryLayout);
 
 async function addProducts(products) {
   const ids = products.map(product => product.id).filter(id => !displayedProducts.has(id));

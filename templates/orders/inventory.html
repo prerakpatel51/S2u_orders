@@ -21,6 +21,7 @@
   <button id="add-inventory-selection" class="primary-button" disabled><i data-lucide="list-plus"></i><span>Add selected</span><strong id="inventory-selection-count">0</strong></button>
 </section>
 <p class="inventory-help">Up/Down moves · Shift+Up/Down checks products · Enter adds · Shift+Enter checks · Shift+click selects a range · Tap checkboxes on touch screens</p>
+<p class="inventory-swipe-hint"><i data-lucide="move-horizontal"></i><span>Swipe sideways to see every store</span></p>
 <section class="inventory-grid-shell"><div id="inventory-grid" class="ag-theme-quartz"></div><div id="inventory-empty" class="inventory-empty"><i data-lucide="package-search"></i><h2>Search and add products</h2><p>Each store will appear as a column with stock and monthly need.</p></div></section>
 
 <dialog id="camera-dialog" class="modal camera-modal">
@@ -45,5 +46,5 @@
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js"></script>
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-<script src="{% static 'orders/product_search_filters.js' %}?v=20260716a"></script><script src="{% static 'orders/inventory.js' %}?v=20260722b"></script>
+<script src="{% static 'orders/product_search_filters.js' %}?v=20260716a"></script><script src="{% static 'orders/inventory.js' %}?v=20260722c"></script>
 {% endblock %}
