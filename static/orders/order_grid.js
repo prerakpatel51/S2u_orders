@@ -426,6 +426,13 @@ function scheduleGridRowHover() {
   if (!gridHoverFrame) gridHoverFrame = requestAnimationFrame(syncGridRowHover);
 }
 
+function handleGridRowHover(event) {
+  gridHoverPointer = {x: event.clientX, y: event.clientY};
+  const target = event.target instanceof Element ? event.target : null;
+  const row = target?.closest('.ag-row[row-index]');
+  showSingleGridRowHover(row && gridElement.contains(row) ? row.getAttribute('row-index') : null);
+}
+
 function handleGridCopy(event) {
   const target = event.target instanceof Element ? event.target : null;
   const editor = target?.closest('input, textarea, [contenteditable="true"]');
@@ -448,14 +455,13 @@ function handleGridCopy(event) {
 }
 
 gridElement.addEventListener('copy', handleGridCopy, true);
-gridElement.addEventListener('pointermove', event => {
-  gridHoverPointer = {x: event.clientX, y: event.clientY};
-  scheduleGridRowHover();
-});
-gridElement.addEventListener('pointerleave', () => {
+// Capture mouse movement before AG Grid's own handlers. `mousemove` is used
+// instead of relying on Pointer Events so this works consistently in Safari.
+gridElement.addEventListener('mousemove', handleGridRowHover, true);
+gridElement.addEventListener('mouseleave', () => {
   gridHoverPointer = null;
-  scheduleGridRowHover();
-});
+  showSingleGridRowHover(null);
+}, true);
 gridElement.addEventListener('scroll', event => {
   clearGridTextSelection(event);
   scheduleGridRowHover();
