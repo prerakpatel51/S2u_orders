@@ -350,6 +350,7 @@ async function loadOrder() {
     columnDefs: [...coreColumns(), ...otherStoreColumns(), ...transferColumns(), ...(orderPermissions.canEdit ? [deleteColumn()] : [])],
     defaultColDef: {sortable: true, resizable: true, filter: true, suppressHeaderMenuButton: false, wrapHeaderText: true, autoHeaderHeight: true},
     rowHeight: 46,
+    suppressRowHoverHighlight: true,
     // Prevent accidental click-and-drag browser selections from leaving large
     // blue blocks across the spreadsheet. Focused-cell copy is handled below.
     enableCellTextSelection: false,
