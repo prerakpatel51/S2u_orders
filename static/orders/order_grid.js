@@ -394,8 +394,15 @@ function handleCellKeyDown(event) {
 }
 
 function clearGridTextSelection(event) {
-  if (event.event?.target?.closest?.('input, textarea, [contenteditable="true"]')) return;
-  window.getSelection()?.removeAllRanges();
+  const activeEditor = document.activeElement?.closest?.('input, textarea, [contenteditable="true"]');
+  if (activeEditor && gridElement.contains(activeEditor)) return;
+
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return;
+  const sourceEvent = event?.event || event;
+  const sourceTarget = sourceEvent?.target instanceof Node ? sourceEvent.target : null;
+  const endpointInGrid = [selection.anchorNode, selection.focusNode].some(node => node && gridElement.contains(node));
+  if (endpointInGrid || (sourceTarget && gridElement.contains(sourceTarget))) selection.removeAllRanges();
 }
 
 function handleGridCopy(event) {
@@ -420,6 +427,10 @@ function handleGridCopy(event) {
 }
 
 gridElement.addEventListener('copy', handleGridCopy, true);
+gridElement.addEventListener('scroll', clearGridTextSelection, true);
+gridElement.addEventListener('wheel', clearGridTextSelection, {capture: true, passive: true});
+gridElement.addEventListener('touchmove', clearGridTextSelection, {capture: true, passive: true});
+document.addEventListener('selectionchange', clearGridTextSelection);
 
 async function saveCell(event) {
   if (event.colDef.field === 'supplier_name') {
