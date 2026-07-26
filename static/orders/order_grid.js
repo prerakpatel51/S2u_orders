@@ -6,6 +6,7 @@ const batchSelectionPanel = document.getElementById('batch-selection');
 const otherStoresButton = document.getElementById('other-stores-button');
 const GRID_FORMAT_COOKIE = 'store_orders_grid_format_v2';
 const orderPermissions = window.ORDER_PERMISSIONS || {isAdmin: false, canEdit: false, isFinalized: false};
+const MAX_ON_SHELF_QUANTITY = 100000;
 let gridApi;
 let orderData;
 let selectedProduct;
@@ -674,6 +675,9 @@ async function chooseProduct(product, {reopenCamera = false} = {}) {
 document.getElementById('cancel-product').addEventListener('click', clearSelected);
 function clearSelected() { selectedProduct = null; suggestionProducts = []; suggestionIndex = -1; keyboardSelectionPending = false; selectedPanel.hidden = true; searchResults.hidden = true; searchInput.value = ''; searchInput.focus(); }
 async function addProductToOrder(product, onShelfQuantity, reopenCamera = false) {
+  if (!Number.isInteger(onShelfQuantity) || onShelfQuantity < 0 || onShelfQuantity > MAX_ON_SHELF_QUANTITY) {
+    throw new Error(`On-shelf quantity must be a whole number between 0 and ${MAX_ON_SHELF_QUANTITY.toLocaleString()}.`);
+  }
   const button = document.getElementById('add-product'); button.disabled = true; button.textContent = 'Adding...';
   try {
     const row = await apiFetch(`/api/orders/${window.ORDER_LIST_ID}/items/`, {method: 'POST', body: JSON.stringify({product_id: product.id, on_shelf_quantity: onShelfQuantity, refresh_stock: product.current_stock === undefined})});

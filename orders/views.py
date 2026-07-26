@@ -20,6 +20,7 @@ from rest_framework.views import APIView
 from redis import Redis
 from redis.exceptions import RedisError
 
+from .constants import MAX_ON_SHELF_QUANTITY, ON_SHELF_QUANTITY_ERROR
 from .exports import (
     EXPORT_KINDS,
     bulk_order_export_response,
@@ -313,8 +314,12 @@ class OrderItemCreateAPIView(APIView):
         stock_value = stock.actual if stock else 0
         need_value = need.needed_quantity if need else 0
         on_shelf = decimal_value(request.data.get("on_shelf_quantity", 0))
-        if on_shelf < 0 or on_shelf != on_shelf.to_integral_value():
-            return Response({"detail": "On-shelf quantity must be a whole, non-negative number."}, status=400)
+        if (
+            on_shelf < 0
+            or on_shelf != on_shelf.to_integral_value()
+            or on_shelf > MAX_ON_SHELF_QUANTITY
+        ):
+            return Response({"detail": ON_SHELF_QUANTITY_ERROR}, status=400)
         on_shelf = int(on_shelf)
         item = order_list.items.filter(product=product).first()
         created = item is None

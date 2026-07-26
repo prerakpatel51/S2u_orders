@@ -3,6 +3,7 @@ import re
 from django.db import transaction
 from rest_framework import serializers
 
+from .constants import MAX_ON_SHELF_QUANTITY, ON_SHELF_QUANTITY_ERROR
 from .models import (
     OrderItemTransfer,
     OrderList,
@@ -188,6 +189,11 @@ class OrderListItemSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["product", "row_order"]
+
+    def validate_on_shelf_quantity(self, value):
+        if value < 0 or value > MAX_ON_SHELF_QUANTITY:
+            raise serializers.ValidationError(ON_SHELF_QUANTITY_ERROR)
+        return value
 
     def _stock_map(self):
         return self.context.get("stock_map", {})
