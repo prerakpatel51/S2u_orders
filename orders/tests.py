@@ -401,7 +401,7 @@ class ReceiptSyncTests(TestCase):
         return {
             "id": str(self.receipt_id),
             "revision": revision,
-            "bookingTime": "2026-07-10T12:00:00-04:00",
+            "bookingTime": timezone.now().isoformat(),
             "organizationalUnit": {"id": str(self.store.korona_id)},
             "cancelled": cancelled,
             "items": [{"product": {"id": str(self.product.korona_id)}, "quantity": quantity}],
