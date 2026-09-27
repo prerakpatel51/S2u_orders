@@ -4,14 +4,28 @@ const storeSelect = document.getElementById('order-store');
 let stores = [];
 let orders = [];
 const canManageOrderLists = Boolean(window.CAN_MANAGE_ORDER_LISTS);
+const naturalCompare = window.gridNaturalCompare || ((left, right) => String(left ?? '').localeCompare(
+  String(right ?? ''),
+  undefined,
+  {numeric: true, sensitivity: 'base'},
+));
+
+function compareOrderLists(left, right) {
+  const byDate = String(right.order_date || '').localeCompare(String(left.order_date || ''));
+  if (byDate) return byDate;
+  return Number(right.id || 0) - Number(left.id || 0);
+}
 
 async function loadHome() {
   try {
     [stores, orders] = await Promise.all([apiFetch('/api/stores/'), apiFetch('/api/orders/')]);
     const grouped = orders.reduce((map, order) => { (map[order.store.id] ||= []).push(order); return map; }, {});
+    Object.values(grouped).forEach(storeOrders => storeOrders.sort(compareOrderLists));
+    stores.sort((left, right) => naturalCompare(left.number, right.number) || naturalCompare(left.name, right.name));
     storeGrid.innerHTML = stores.length ? stores.map(store => {
-      const recent = (grouped[store.id] || []).slice(0, 4);
-      return `<article class="store-card"><div class="store-card-head"><div class="store-number">STORE</div><span>${store.order_count} lists</span></div><h2>${escapeHtml(store.number)}</h2><div class="recent-lists">${recent.length ? recent.map(order => `<div class="recent-list-row"><a href="/orders/${order.id}/"><span>${order.order_date}</span><span>${order.item_count} items</span></a>${canManageOrderLists ? `<button type="button" class="list-card-delete" data-delete-order="${order.id}" data-order-date="${order.order_date}" data-store-number="${escapeHtml(store.number)}" title="Delete list" aria-label="Delete ${order.order_date} list for store ${escapeHtml(store.number)}"><i data-lucide="trash-2"></i></button>` : ''}</div>`).join('') : '<p>No order lists yet</p>'}</div><button class="secondary-button store-new" data-store="${store.id}"><i data-lucide="plus"></i>New list</button></article>`;
+      const storeOrders = grouped[store.id] || [];
+      const listLabel = `Order lists for store ${store.number}`;
+      return `<article class="store-card"><div class="store-card-head"><div class="store-number">STORE</div><span>${store.order_count} lists</span></div><h2>${escapeHtml(store.number)}</h2><div class="recent-lists" tabindex="0" role="region" aria-label="${escapeHtml(listLabel)}">${storeOrders.length ? storeOrders.map(order => `<div class="recent-list-row"><a href="/orders/${order.id}/"><span>${order.order_date}</span><span>${order.item_count} items</span></a>${canManageOrderLists ? `<button type="button" class="list-card-delete" data-delete-order="${order.id}" data-order-date="${order.order_date}" data-store-number="${escapeHtml(store.number)}" title="Delete list" aria-label="Delete ${order.order_date} list for store ${escapeHtml(store.number)}"><i data-lucide="trash-2"></i></button>` : ''}</div>`).join('') : '<p>No order lists yet</p>'}</div><button class="secondary-button store-new" data-store="${store.id}"><i data-lucide="plus"></i>New list</button></article>`;
     }).join('') : '<div class="empty-state">No stores are synchronized yet. An administrator can run the Stores service from Operations.</div>';
     storeSelect.innerHTML = stores.map(s => `<option value="${s.id}">${escapeHtml(s.number)}</option>`).join('');
     lucide.createIcons();

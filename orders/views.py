@@ -161,10 +161,14 @@ class StoreListAPIView(APIView):
 
 class OrderListAPIView(APIView):
     def get(self, request):
-        lists = OrderList.objects.select_related("store").annotate(item_count=Count("items"))
+        lists = (
+            OrderList.objects.select_related("store")
+            .annotate(item_count=Count("items"))
+            .order_by("-order_date", "store__number", "-id")
+        )
         if request.query_params.get("store"):
             lists = lists.filter(store_id=request.query_params["store"])
-        return Response(OrderListSummarySerializer(lists[:200], many=True).data)
+        return Response(OrderListSummarySerializer(lists, many=True).data)
 
     def post(self, request):
         store = get_object_or_404(Store, pk=request.data.get("store_id"), active=True)

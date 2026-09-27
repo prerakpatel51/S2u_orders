@@ -17,4 +17,4 @@
   </form>
 </dialog>
 {% endblock %}
-{% block scripts %}<script>window.CAN_MANAGE_ORDER_LISTS={{ user.is_staff|yesno:"true,false" }}||{{ user.is_superuser|yesno:"true,false" }};</script><script src="{% static 'orders/home.js' %}?v=20260712a"></script>{% endblock %}
+{% block scripts %}<script>window.CAN_MANAGE_ORDER_LISTS={{ user.is_staff|yesno:"true,false" }}||{{ user.is_superuser|yesno:"true,false" }};</script><script src="{% static 'orders/home.js' %}?v=20260927a"></script>{% endblock %}

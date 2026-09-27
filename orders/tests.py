@@ -783,6 +783,27 @@ class OrderApiTests(TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(OrderList.objects.count(), 1)
 
+    def test_order_list_index_returns_every_list_newest_first(self):
+        oldest_date = date(2026, 1, 1)
+        OrderList.objects.bulk_create(
+            [
+                OrderList(
+                    store=self.store,
+                    order_date=oldest_date + timedelta(days=offset),
+                    created_by=self.user,
+                )
+                for offset in range(205)
+            ]
+        )
+
+        response = self.client.get("/api/orders/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload), 205)
+        self.assertEqual(payload[0]["order_date"], "2026-07-24")
+        self.assertEqual(payload[-1]["order_date"], "2026-01-01")
+
     def test_product_suggestions_include_current_store_stock(self):
         product = Product.objects.create(
             korona_id=uuid.uuid4(),
